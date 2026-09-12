@@ -1,6 +1,8 @@
 import { CheckCircle2, Circle } from "lucide-react";
+import { memo } from "react";
 import { formatCompactNumber } from "#/lib/present";
 import type { DmConversationItem, DmMessageItem } from "#/lib/types";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 import {
 	composerBarClass,
 	composerInputClass,
@@ -41,7 +43,11 @@ import { AvatarChip } from "./AvatarChip";
 import { BirdclawEmpty } from "./BrandMark";
 import { SmartTimestamp } from "./SmartTimestamp";
 
-function MessageBubble({ message }: { message: DmMessageItem }) {
+const MessageBubble = memo(function MessageBubble({
+	message,
+}: {
+	message: DmMessageItem;
+}) {
 	const outbound = message.direction === "outbound";
 	return (
 		<div
@@ -62,12 +68,99 @@ function MessageBubble({ message }: { message: DmMessageItem }) {
 			</div>
 		</div>
 	);
-}
+});
+
+const ConversationList = memo(function ConversationList({
+	conversations,
+	selectedConversationId,
+	onSelectConversation,
+}: {
+	conversations: DmConversationItem[];
+	selectedConversationId?: string;
+	onSelectConversation: (id: string) => void;
+}) {
+	return (
+		<aside className={dmListClass}>
+			{conversations.length === 0 ? (
+				<BirdclawEmpty
+					detail="Sync DMs to populate this lane."
+					label="No conversations"
+				/>
+			) : null}
+			{conversations.map((conversation) => {
+				const active = conversation.id === selectedConversationId;
+				return (
+					<button
+						key={conversation.id}
+						className={cx(dmListItemClass, active && dmListItemActiveClass)}
+						onClick={() => onSelectConversation(conversation.id)}
+						type="button"
+					>
+						<AvatarChip
+							avatarUrl={conversation.participant.avatarUrl}
+							hue={conversation.participant.avatarHue}
+							name={conversation.participant.displayName}
+							profileId={conversation.participant.id}
+						/>
+						<div className={dmListBodyClass}>
+							<div className={dmListHeaderClass}>
+								<div className="flex min-w-0 items-center gap-1.5">
+									<span className={dmListNameClass}>
+										{conversation.participant.displayName}
+									</span>
+									<span className={dmListHandleClass}>
+										@{conversation.participant.handle}
+									</span>
+								</div>
+								<SmartTimestamp
+									className={dmListTimestampClass}
+									value={conversation.lastMessageAt}
+								/>
+							</div>
+							<p className={dmListPreviewClass}>
+								{conversation.lastMessagePreview}
+							</p>
+							<div className="mt-1 flex items-center gap-1.5">
+								<span
+									className={cx(
+										pillClass,
+										conversation.needsReply ? pillAlertClass : pillSoftClass,
+									)}
+									aria-label={
+										conversation.needsReply ? "Reply open" : "We replied"
+									}
+								>
+									{conversation.needsReply ? (
+										<Circle className="size-3" strokeWidth={2.2} />
+									) : (
+										<CheckCircle2 className="size-3.5" strokeWidth={2} />
+									)}
+									{conversation.needsReply ? "open" : "replied"}
+								</span>
+								{conversation.isMessageRequest ? (
+									<span className={cx(pillClass, pillAlertClass)}>request</span>
+								) : null}
+								<span className={cx(pillClass, pillSoftClass)}>
+									{formatCompactNumber(conversation.participant.followersCount)}{" "}
+									followers
+								</span>
+							</div>
+						</div>
+					</button>
+				);
+			})}
+		</aside>
+	);
+});
 
 export function DmWorkspace({
 	conversations,
 	selectedConversation,
 	selectedMessages,
+	hasEarlier = false,
+	loadingEarlier = false,
+	onLoadEarlier,
+	earlierError,
 	onSelectConversation,
 	replyDraft,
 	onReplyDraftChange,
@@ -76,11 +169,16 @@ export function DmWorkspace({
 	conversations: DmConversationItem[];
 	selectedConversation: DmConversationItem | null;
 	selectedMessages: DmMessageItem[];
+	hasEarlier?: boolean;
+	loadingEarlier?: boolean;
+	onLoadEarlier?: () => void;
+	earlierError?: string;
 	onSelectConversation: (conversationId: string) => void;
 	replyDraft: string;
 	onReplyDraftChange: (value: string) => void;
 	onReplySend: (conversationId: string) => void;
 }) {
+	const { readOnly } = useDeploymentMode();
 	const participant = selectedConversation?.participant ?? null;
 	const selectedStatus = selectedConversation
 		? selectedConversation.isMessageRequest
@@ -92,80 +190,11 @@ export function DmWorkspace({
 
 	return (
 		<section aria-label="DM workspace" className={dmShellClass}>
-			<aside className={dmListClass}>
-				{conversations.length === 0 ? (
-					<BirdclawEmpty
-						detail="Sync DMs to populate this lane."
-						label="No conversations"
-					/>
-				) : null}
-				{conversations.map((conversation) => {
-					const active = conversation.id === selectedConversation?.id;
-					return (
-						<button
-							key={conversation.id}
-							className={cx(dmListItemClass, active && dmListItemActiveClass)}
-							onClick={() => onSelectConversation(conversation.id)}
-							type="button"
-						>
-							<AvatarChip
-								avatarUrl={conversation.participant.avatarUrl}
-								hue={conversation.participant.avatarHue}
-								name={conversation.participant.displayName}
-								profileId={conversation.participant.id}
-							/>
-							<div className={dmListBodyClass}>
-								<div className={dmListHeaderClass}>
-									<div className="flex min-w-0 items-center gap-1.5">
-										<span className={dmListNameClass}>
-											{conversation.participant.displayName}
-										</span>
-										<span className={dmListHandleClass}>
-											@{conversation.participant.handle}
-										</span>
-									</div>
-									<SmartTimestamp
-										className={dmListTimestampClass}
-										value={conversation.lastMessageAt}
-									/>
-								</div>
-								<p className={dmListPreviewClass}>
-									{conversation.lastMessagePreview}
-								</p>
-								<div className="mt-1 flex items-center gap-1.5">
-									<span
-										className={cx(
-											pillClass,
-											conversation.needsReply ? pillAlertClass : pillSoftClass,
-										)}
-										aria-label={
-											conversation.needsReply ? "Reply open" : "We replied"
-										}
-									>
-										{conversation.needsReply ? (
-											<Circle className="size-3" strokeWidth={2.2} />
-										) : (
-											<CheckCircle2 className="size-3.5" strokeWidth={2} />
-										)}
-										{conversation.needsReply ? "open" : "replied"}
-									</span>
-									{conversation.isMessageRequest ? (
-										<span className={cx(pillClass, pillAlertClass)}>
-											request
-										</span>
-									) : null}
-									<span className={cx(pillClass, pillSoftClass)}>
-										{formatCompactNumber(
-											conversation.participant.followersCount,
-										)}{" "}
-										followers
-									</span>
-								</div>
-							</div>
-						</button>
-					);
-				})}
-			</aside>
+			<ConversationList
+				conversations={conversations}
+				selectedConversationId={selectedConversation?.id}
+				onSelectConversation={onSelectConversation}
+			/>
 
 			<div className={dmThreadClass}>
 				{selectedConversation ? (
@@ -198,6 +227,7 @@ export function DmWorkspace({
 							</div>
 							<button
 								className={primaryButtonClass}
+								hidden={readOnly}
 								onClick={() => onReplySend(selectedConversation.id)}
 								type="button"
 							>
@@ -245,11 +275,30 @@ export function DmWorkspace({
 							</div>
 						) : null}
 						<div className={dmMessagesClass}>
+							{hasEarlier ? (
+								<div className="flex flex-col items-center gap-2">
+									<button
+										type="button"
+										disabled={loadingEarlier}
+										onClick={onLoadEarlier}
+										className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-semibold text-[var(--ink)] disabled:opacity-50"
+									>
+										{loadingEarlier
+											? "Loading earlier messages..."
+											: "Load earlier messages"}
+									</button>
+									{earlierError ? (
+										<p role="alert" className="text-sm text-red-500">
+											{earlierError}
+										</p>
+									) : null}
+								</div>
+							) : null}
 							{selectedMessages.map((message) => (
 								<MessageBubble key={message.id} message={message} />
 							))}
 						</div>
-						<div className={dmComposerShellClass}>
+						<div hidden={readOnly} className={dmComposerShellClass}>
 							<textarea
 								className={composerInputClass}
 								onChange={(event) => onReplyDraftChange(event.target.value)}

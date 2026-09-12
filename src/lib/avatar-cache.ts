@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Effect } from "effect";
-import { getBirdclawPaths } from "./config";
+import { getBirdclawPaths, isReadOnlyDeployment } from "./config";
 import { getNativeDb } from "./db";
 import { runEffectPromise, tryPromise, trySync } from "./effect-runtime";
 import { assertSafePreviewUrl } from "./url-safety";
@@ -28,7 +28,7 @@ function sanitizeFileToken(value: string) {
 function getAvatarCacheDir() {
 	const { mediaThumbsDir } = getBirdclawPaths();
 	const dir = path.join(mediaThumbsDir, "avatars");
-	mkdirSync(dir, { recursive: true });
+	if (!isReadOnlyDeployment()) mkdirSync(dir, { recursive: true });
 	return dir;
 }
 
@@ -261,6 +261,7 @@ export function readCachedAvatarEffect(profileId: string) {
 			};
 		}
 
+		if (isReadOnlyDeployment()) return null;
 		const payload = normalizedAvatarUrl.startsWith("data:")
 			? yield* trySync(() => decodeDataUrl(normalizedAvatarUrl))
 			: yield* fetchRemoteAvatarEffect(normalizedAvatarUrl);

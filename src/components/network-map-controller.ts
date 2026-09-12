@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { useSelectedAccountId } from "./account-selection";
+import { useQueryAccount } from "./account-selection";
 import {
 	MAP_TYPES,
 	WORLD_VIEWPORT,
 	boundsContainFeature,
+	compareClusterFeatures,
 	featureMatchesSearch,
 	fetchMap,
 	type MapViewport,
@@ -28,13 +29,15 @@ export function useNetworkMapController(
 		queryKey: queryKeys.status,
 		queryFn: ({ signal }) => fetchQueryEnvelope({ signal }),
 	});
-	const selectedAccountId = useSelectedAccountId(statusQuery.data?.accounts);
+	const { selectedAccountId, accountSelectionSettled } =
+		useQueryAccount(statusQuery);
 	const mapQueryKey = [
 		...queryKeys.networkMap,
 		{ type, selectedAccountId: selectedAccountId ?? null },
 	] as const;
 	const mapQuery = useQuery({
 		queryKey: mapQueryKey,
+		enabled: accountSelectionSettled,
 		queryFn: ({ signal }) => fetchMap(type, false, selectedAccountId, signal),
 		staleTime: 5 * 60_000,
 	});
@@ -48,17 +51,16 @@ export function useNetworkMapController(
 	const loading = mapQuery.isPending || refreshMutation.isPending;
 	const queryError = refreshMutation.error ?? mapQuery.error;
 
+	const rankedFeatures = useMemo(
+		() => [...(data?.features ?? [])].sort(compareClusterFeatures),
+		[data?.features],
+	);
 	const visibleFeatures = useMemo(
 		() =>
-			(data?.features ?? [])
-				.slice()
-				.filter((feature) => boundsContainFeature(viewport.bounds, feature))
-				.sort(
-					(a, b) =>
-						b.properties.followersCount - a.properties.followersCount ||
-						a.properties.handle.localeCompare(b.properties.handle),
-				),
-		[data, viewport],
+			rankedFeatures.filter((feature) =>
+				boundsContainFeature(viewport.bounds, feature),
+			),
+		[rankedFeatures, viewport],
 	);
 	const filteredVisibleFeatures = useMemo(
 		() =>

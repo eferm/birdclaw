@@ -3,12 +3,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Command } from "commander";
+import { Command, CommanderError } from "commander";
 import {
 	configureOperationAccountSelection,
 	createCommandContext,
+	printError,
 	resetOperationAccountSelection,
 } from "#/cli/command-context";
+import {
+	configureNumericOptions,
+	NumericOptionError,
+} from "#/cli/numeric-options";
 import { registerAnalysisCommands } from "#/cli/register-analysis";
 import { registerComposeCommands } from "#/cli/register-compose";
 import { registerCoreCommands } from "#/cli/register-core";
@@ -21,9 +26,14 @@ import { registerMentionCommands } from "#/cli/register-mentions";
 import { registerModerationCommands } from "#/cli/register-moderation";
 import { registerSearchCommands } from "#/cli/register-search";
 import { registerServeCommand } from "#/cli/register-serve";
+import { registerShowCommands } from "#/cli/register-show";
 import { registerStorageCommands } from "#/cli/register-storage";
 import { registerSyncCommands } from "#/cli/register-sync";
 import { closeDatabase } from "#/lib/db";
+import {
+	captureCliPerformance,
+	writeCliPerformance,
+} from "#/lib/cli-performance";
 
 function findPackageRoot(entryUrl: string) {
 	let directory = dirname(fileURLToPath(entryUrl));
@@ -45,8 +55,18 @@ export const program = new Command()
 	.name("birdclaw")
 	.description("Local-first Twitter workspace")
 	.version(packageVersion.version ?? "0.0.0")
-	.option("--json", "Emit JSON output");
+	.option("--json", "Emit JSON output")
+	.configureHelp({ showGlobalOptions: true })
+	.configureOutput({
+		// The entrypoint reports parser failures once, in the selected output mode.
+		outputError: () => {},
+		writeErr: (text) => {
+			if (!program.opts().json) process.stderr.write(text);
+		},
+	})
+	.exitOverride();
 const commandContext = createCommandContext(program);
+configureNumericOptions(program);
 configureOperationAccountSelection(program);
 
 registerCoreCommands(commandContext);
@@ -62,6 +82,7 @@ registerComposeCommands(commandContext);
 registerInboxCommand(commandContext);
 registerGraphCommands(commandContext);
 registerStorageCommands(commandContext);
+registerShowCommands(commandContext);
 registerServeCommand(
 	commandContext,
 	packageRoot,
@@ -69,21 +90,52 @@ registerServeCommand(
 );
 
 export async function runCli(argv = process.argv) {
+	const profile =
+		process.env.BIRDCLAW_CLI_METRICS === "1"
+			? captureCliPerformance()
+			: undefined;
 	try {
 		await program.parseAsync(argv);
+	} catch (error) {
+		if (error instanceof NumericOptionError) {
+			printError(error.message);
+			process.exitCode = 1;
+			return;
+		}
+		if (!(error instanceof CommanderError) || error.exitCode !== 0) {
+			throw error;
+		}
 	} finally {
 		resetOperationAccountSelection();
-		await closeDatabase();
+		try {
+			await closeDatabase();
+		} finally {
+			if (profile) writeCliPerformance(profile());
+		}
 	}
 }
 
-/* v8 ignore next 5 */
+export async function runCliMain(argv = process.argv) {
+	try {
+		await runCli(argv);
+	} catch (error) {
+		const message =
+			error instanceof CommanderError && error.code === "commander.help"
+				? "A subcommand is required. Run birdclaw --help for usage."
+				: error instanceof Error
+					? error.message
+					: String(error);
+		console.error(
+			program.opts().json ? JSON.stringify({ error: message }) : message,
+		);
+		process.exitCode = error instanceof CommanderError ? 2 : 1;
+	}
+}
+
+/* v8 ignore next 4 */
 if (process.argv[1]) {
 	const entryUrl = pathToFileURL(process.argv[1]).href;
 	if (import.meta.url === entryUrl) {
-		void runCli().catch((error) => {
-			console.error(error instanceof Error ? error.message : String(error));
-			process.exitCode = 1;
-		});
+		void runCliMain();
 	}
 }

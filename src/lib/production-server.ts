@@ -9,7 +9,10 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
-import { LOCAL_WEB_PEER_HEADER } from "./http-effect";
+import {
+	LOCAL_WEB_PEER_HEADER,
+	readOnlyRequestErrorResponse,
+} from "./http-effect";
 import {
 	type BirdclawMcpRuntime,
 	handleBirdclawMcpExchange,
@@ -31,6 +34,7 @@ export interface ProductionServerOptions {
 	requestTimeoutMs?: number;
 	headersTimeoutMs?: number;
 	mcpResponseTimeoutMs?: number;
+	json?: boolean;
 	onListening?: (address: { host: string; port: number }) => void;
 }
 
@@ -373,6 +377,15 @@ export async function startProductionServer({
 					return;
 				}
 
+				const readOnlyDenied = readOnlyRequestErrorResponse({
+					url: url.href,
+					method: request.method ?? "GET",
+				});
+				if (readOnlyDenied) {
+					request.resume();
+					await sendWebResponse(readOnlyDenied, response);
+					return;
+				}
 				if (await sendStaticFile(request, response, clientDir, url.pathname))
 					return;
 				await sendWebResponse(
@@ -415,7 +428,12 @@ export async function runProductionServer(options: ProductionServerOptions) {
 		throw new Error("Production server did not bind a TCP address");
 	}
 	const host = options.host ?? "127.0.0.1";
-	console.log(`Birdclaw listening on http://${host}:${String(address.port)}`);
+	const url = `http://${host.includes(":") ? `[${host}]` : host}:${String(address.port)}`;
+	console.log(
+		options.json
+			? JSON.stringify({ ok: true, host, port: address.port, url })
+			: `Birdclaw listening on ${url}`,
+	);
 	options.onListening?.({ host, port: address.port });
 
 	await new Promise<never>((_, reject) => {

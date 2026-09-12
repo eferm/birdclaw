@@ -43,6 +43,25 @@ afterEach(() => {
 });
 
 describe("AppNav", () => {
+	it("keeps cached archive navigation and hides live-only pages in read-only mode", () => {
+		render(
+			<ThemeProvider>
+				<AppNav />
+			</ThemeProvider>,
+			{ readOnly: true },
+		);
+		expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "DMs" })).toBeInTheDocument();
+		for (const name of [
+			"Today",
+			"Discuss",
+			"Analyse",
+			"Sources",
+			"Rate Limits",
+		])
+			expect(screen.queryByRole("link", { name })).not.toBeInTheDocument();
+		expect(screen.getByText("Read-only archive")).toBeInTheDocument();
+	});
 	it("marks the active route", () => {
 		render(
 			<ThemeProvider>

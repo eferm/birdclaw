@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { Data, Effect } from "effect";
 import { runEffectPromise } from "./effect-runtime";
+import { isReadOnlyDeployment } from "./config";
 
 const execFileAsync = promisify(execFile) as unknown as (
 	command: string,
@@ -149,6 +150,12 @@ export function runSubprocessEffect(
 	options: SubprocessOptions,
 ): Effect.Effect<SubprocessResult, SubprocessError | TypeError> {
 	return Effect.suspend(() => {
+		if (isReadOnlyDeployment())
+			return Effect.fail(
+				new TypeError(
+					"Subprocesses are disabled in a read-only archive deployment",
+				),
+			);
 		let timeoutMs: number | undefined;
 		try {
 			timeoutMs = validatedTimeout(options);

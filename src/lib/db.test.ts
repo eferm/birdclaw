@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import {
 } from "./db";
 import { seedDemoData } from "./seed";
 import NativeSqliteDatabase, { SQLITE_BUSY_TIMEOUT_MS } from "./sqlite";
+import { upsertProfileFromXUser } from "./x-profile";
 
 const tempDirs: string[] = [];
 
@@ -429,7 +430,7 @@ describe("database init", () => {
 			{ name: "fxtwitter_fetches" },
 			{ name: "fxtwitter_observations" },
 		]);
-		expect(db.pragma("user_version", { simple: true })).toBe(10);
+		expect(db.pragma("user_version", { simple: true })).toBe(11);
 	});
 
 	it("adds revision edges without rewriting v6 revision rows", () => {
@@ -452,7 +453,7 @@ describe("database init", () => {
 		resetDatabaseForTests();
 
 		const migrated = getNativeDb({ seedDemoData: false });
-		expect(migrated.pragma("user_version", { simple: true })).toBe(10);
+		expect(migrated.pragma("user_version", { simple: true })).toBe(11);
 		expect(
 			migrated
 				.prepare(
@@ -626,9 +627,66 @@ describe("database init", () => {
 		).toThrow(/read.?only|write/i);
 	});
 
+	it("preserves v9 snapshots until writable upgrade adds indexes and Note Tweet storage", () => {
+		const tempDir = mkdtempSync(
+			path.join(os.tmpdir(), "birdclaw-db-v9-indexes-"),
+		);
+		tempDirs.push(tempDir);
+		process.env.BIRDCLAW_HOME = tempDir;
+		const db = getNativeDb({ seedDemoData: false });
+		db.exec(`
+      insert into follow_snapshot_members values ('fixture','profile_user_42','incorrect',0);
+      insert into follow_snapshot_members values ('fixture','profile_user_43','43',1);
+      drop index idx_follow_snapshot_members_profile;
+      drop index idx_follow_events_profile;
+      drop index idx_x_lists_owner_profile;
+      alter table tweets drop column note_tweet_json;
+      pragma user_version=9;
+    `);
+		resetDatabaseForTests();
+		const filename = path.join(tempDir, "birdclaw.sqlite");
+		const before = readFileSync(filename);
+		expect(() => getStrictReadDb()).toThrow(
+			/schema 9 is not ready for version 11/,
+		);
+		resetDatabaseForTests();
+		expect(readFileSync(filename)).toEqual(before);
+		const upgraded = getNativeDb({ seedDemoData: false });
+		expect(upgraded.pragma("user_version", { simple: true })).toBe(11);
+		for (const [table, column, index] of [
+			[
+				"follow_snapshot_members",
+				"profile_id",
+				"idx_follow_snapshot_members_profile",
+			],
+			["follow_events", "profile_id", "idx_follow_events_profile"],
+			["x_lists", "owner_profile_id", "idx_x_lists_owner_profile"],
+		]) {
+			const plan = upgraded
+				.prepare(`explain query plan select * from ${table} where ${column}=?`)
+				.all("profile_user_42");
+			expect(JSON.stringify(plan)).toContain(`USING INDEX ${index}`);
+		}
+		upsertProfileFromXUser(upgraded, {
+			id: "42",
+			username: "fixture",
+			name: "Fixture",
+		});
+		expect(
+			upgraded
+				.prepare(
+					"select profile_id,external_user_id from follow_snapshot_members order by profile_id",
+				)
+				.all(),
+		).toEqual([
+			{ profile_id: "profile_user_42", external_user_id: "42" },
+			{ profile_id: "profile_user_43", external_user_id: "43" },
+		]);
+	});
+
 	it.each([
 		{ kind: "stale", version: 4 },
-		{ kind: "future", version: 11 },
+		{ kind: "future", version: 12 },
 	])(
 		"rejects a $kind schema and closes its provisional reader",
 		({ version }) => {
@@ -663,10 +721,10 @@ describe("database init", () => {
 
 		const writer = getNativeDb({ seedDemoData: false });
 		getReadDb({ seedDemoData: false });
-		writer.pragma("user_version = 11");
+		writer.pragma("user_version = 12");
 
 		expect(() => getStrictReadDb()).toThrow(
-			/schema 11 is not ready for version 10/,
+			/schema 12 is not ready for version 11/,
 		);
 	});
 
@@ -806,6 +864,34 @@ describe("native sqlite compatibility wrapper", () => {
 
 		db.close();
 		expect(() => db.close()).not.toThrow();
+	});
+
+	it("keeps dangerous column names as own data and rows independent", () => {
+		const db = new NativeSqliteDatabase(":memory:");
+		const statement = db.prepare(
+			'select ? as "__proto__", ? as "constructor", ? as data',
+		);
+		const first = statement.get(
+			"literal",
+			"value",
+			Buffer.from([1, 2, 3]),
+		) as Record<string, unknown>;
+		expect(Object.getPrototypeOf(first)).toBe(Object.prototype);
+		expect(Object.hasOwn(first, "__proto__")).toBe(true);
+		expect(first.__proto__).toBe("literal");
+		expect(first.constructor).toBe("value");
+		expect(first.data).toEqual(Buffer.from([1, 2, 3]));
+		first.__proto__ = "changed";
+		const second = statement.all(
+			"fresh",
+			"other",
+			Buffer.from([4]),
+		)[0] as Record<string, unknown>;
+		expect(second.__proto__).toBe("fresh");
+		expect(Object.getPrototypeOf(second)).toBe(Object.prototype);
+		expect(second.data).toEqual(Buffer.from([4]));
+		expect(first.__proto__).toBe("changed");
+		db.close();
 	});
 
 	it("commits, rolls back, and nests transactions with savepoints", () => {

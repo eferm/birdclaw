@@ -8,6 +8,7 @@ import {
 	Repeat2,
 	UserSearch,
 } from "lucide-react";
+import { memo } from "react";
 import { formatCompactNumber } from "#/lib/present";
 import {
 	isTweetArticleUrlEntity,
@@ -21,6 +22,7 @@ import type {
 	TweetUrlEntity,
 } from "#/lib/types";
 import { useConversationSurface } from "#/lib/conversation-surface";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 import {
 	cx,
 	embeddedCardClass,
@@ -44,6 +46,7 @@ import { AvatarChip } from "./AvatarChip";
 import { ConversationThread } from "./ConversationThread";
 import { EmbeddedTweetCard } from "./EmbeddedTweetCard";
 import { LinkPreviewCard } from "./LinkPreviewCard";
+import { OpenTweetLink } from "./OpenTweetLink";
 import { ProfilePreview } from "./ProfilePreview";
 import { SmartTimestamp } from "./SmartTimestamp";
 import { TweetArticleCard } from "./TweetArticleCard";
@@ -280,7 +283,7 @@ function TweetPresentation({
 	);
 }
 
-export function TimelineCard({
+export const TimelineCard = memo(function TimelineCard({
 	item,
 	onReply,
 	showReplyControls = true,
@@ -289,8 +292,12 @@ export function TimelineCard({
 	onReply: (tweetId: string) => void;
 	showReplyControls?: boolean;
 }) {
+	const { readOnly } = useDeploymentMode();
 	const canReply =
-		showReplyControls && item.kind !== "like" && item.kind !== "bookmark";
+		!readOnly &&
+		showReplyControls &&
+		item.kind !== "like" &&
+		item.kind !== "bookmark";
 	const displayTweet = item.retweetedTweet ?? item;
 	const displayTweetId = displayTweet.id;
 	const interactionTweetId =
@@ -420,7 +427,7 @@ export function TimelineCard({
 					visibleUrlCards={visibleUrlCards}
 				/>
 				<footer className={feedRowActionsClass}>
-					<div className="flex items-center gap-3 text-[13px] text-[var(--ink-soft)]">
+					<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-[var(--ink-soft)]">
 						<button
 							aria-expanded={conversation.isOpen}
 							aria-label={
@@ -443,6 +450,7 @@ export function TimelineCard({
 								{conversation.isOpen ? "Hide thread" : "Thread"}
 							</span>
 						</button>
+						<OpenTweetLink tweetId={interactionTweetId} />
 						{canReply ? (
 							<button
 								className={feedActionButtonClass}
@@ -463,6 +471,7 @@ export function TimelineCard({
 							</button>
 						) : null}
 						<a
+							hidden={readOnly}
 							aria-label={`Analyse @${displayAuthor.handle}`}
 							className={feedActionButtonClass}
 							href={`/profiles/${encodeURIComponent(displayAuthor.handle)}`}
@@ -528,4 +537,4 @@ export function TimelineCard({
 			</div>
 		</article>
 	);
-}
+});

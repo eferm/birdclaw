@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DmWorkspace } from "./DmWorkspace";
+import { renderWithQueryClient } from "#/test/render";
 
 afterEach(() => {
 	cleanup();
@@ -29,6 +30,54 @@ const conversation = {
 };
 
 describe("DmWorkspace", () => {
+	it("offers earlier history with a disabled loading state and a retryable error", () => {
+		const load = vi.fn();
+		const props = {
+			conversations: [conversation],
+			selectedConversation: conversation,
+			selectedMessages: [],
+			replyDraft: "",
+			onReplyDraftChange: vi.fn(),
+			onReplySend: vi.fn(),
+			onSelectConversation: vi.fn(),
+			hasEarlier: true,
+			onLoadEarlier: load,
+		};
+		const view = render(<DmWorkspace {...props} />);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Load earlier messages" }),
+		);
+		expect(load).toHaveBeenCalledOnce();
+		view.rerender(<DmWorkspace {...props} loadingEarlier />);
+		expect(
+			screen.getByRole("button", { name: "Loading earlier messages..." }),
+		).toBeDisabled();
+		view.rerender(<DmWorkspace {...props} earlierError="Try again" />);
+		expect(screen.getByRole("alert")).toHaveTextContent("Try again");
+	});
+
+	it("reads conversations without reply controls in a read-only deployment", () => {
+		renderWithQueryClient(
+			<DmWorkspace
+				conversations={[conversation]}
+				selectedConversation={conversation}
+				selectedMessages={[]}
+				onSelectConversation={vi.fn()}
+				replyDraft="draft"
+				onReplyDraftChange={vi.fn()}
+				onReplySend={vi.fn()}
+			/>,
+			{ readOnly: true },
+		);
+		expect(screen.getAllByText("Sam Altman").length).toBeGreaterThan(0);
+		expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "Reply" }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "Send reply" }),
+		).not.toBeInTheDocument();
+	});
 	it("renders selected conversation and sends reply", () => {
 		const onSelectConversation = vi.fn();
 		const onReplyDraftChange = vi.fn();

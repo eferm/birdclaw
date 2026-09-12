@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetBirdclawPathsForTests } from "./config";
 import { getNativeDb, resetDatabaseForTests } from "./db";
 import { getLinkInsights } from "./link-insights";
@@ -232,6 +232,45 @@ describe("link insights", () => {
 		resetBirdclawPathsForTests();
 		delete process.env.BIRDCLAW_HOME;
 		rmSync(homeDir, { recursive: true, force: true });
+	});
+
+	it("normalizes repeated URLs once per read and observes later expansion changes", () => {
+		const db = insertAccountFixture();
+		const shortUrl = "https://t.co/repeated";
+		insertExpansion(db, {
+			shortUrl,
+			finalUrl: "https://example.com/shared?utm_source=test",
+		});
+		for (let i = 0; i < 20; i++) {
+			insertTweet(db, {
+				id: `repeated_${i}`,
+				authorProfileId: "profile_a",
+				text: "Shared link",
+				createdAt: localIso(),
+			});
+			insertOccurrence(db, {
+				sourceKind: "tweet",
+				sourceId: `repeated_${i}`,
+				shortUrl,
+				createdAt: localIso(),
+			});
+		}
+		const normalizations = vi.spyOn(URLSearchParams.prototype, "sort");
+		try {
+			const result = getLinkInsights({ range: "all" });
+			expect(result.items).toHaveLength(1);
+			expect(result.items[0]?.shareCount).toBe(20);
+			expect(normalizations).toHaveBeenCalledTimes(1);
+			db.prepare(
+				"update url_expansions set final_url = 'https://example.com/refreshed?utm_source=test' where short_url = ?",
+			).run(shortUrl);
+			expect(getLinkInsights({ range: "all" }).items[0]?.url).toBe(
+				"https://example.com/refreshed",
+			);
+			expect(normalizations).toHaveBeenCalledTimes(2);
+		} finally {
+			normalizations.mockRestore();
+		}
 	});
 
 	it("groups top links, strips shared URLs from comments, and splits videos", () => {
@@ -587,6 +626,89 @@ describe("link insights", () => {
 			getLinkInsights({ range: "week", limit: 1, now }).items[0]?.url,
 		).toBe("http://localhost:8080/dashboard");
 	});
+
+	it.each(["rank", "recent"] as const)(
+		"resolves %s ties before full hydration and uses the DM sender's influence",
+		(sort) => {
+			const db = insertAccountFixture();
+			const createdAt = "2026-05-10T10:00:00.000Z";
+			for (let i = 0; i < 40; i++) {
+				const id = `tie_${i}`;
+				const shortUrl = `https://t.co/tie${i}`;
+				insertTweet(db, {
+					id,
+					authorProfileId: i === 0 ? "profile_me" : "profile_b",
+					text: shortUrl,
+					createdAt,
+				});
+				insertExpansion(db, { shortUrl, finalUrl: `https://example.com/${i}` });
+				insertOccurrence(db, {
+					sourceKind: "tweet",
+					sourceId: id,
+					shortUrl,
+					createdAt,
+				});
+			}
+			insertDmMessage(db, {
+				id: "dm_tie",
+				senderProfileId: "profile_a",
+				text: "https://t.co/dm-tie",
+				createdAt,
+			});
+			insertExpansion(db, {
+				shortUrl: "https://t.co/dm-tie",
+				finalUrl: "https://example.com/dm",
+			});
+			insertOccurrence(db, {
+				sourceKind: "dm",
+				sourceId: "dm_tie",
+				shortUrl: "https://t.co/dm-tie",
+				createdAt,
+			});
+			insertExpansion(db, {
+				shortUrl: "https://t.co/missing",
+				finalUrl: "https://example.com/missing",
+			});
+			insertOccurrence(db, {
+				sourceKind: "tweet",
+				sourceId: "missing",
+				shortUrl: "https://t.co/missing",
+				createdAt,
+			});
+			const hydrated: number[] = [];
+			const original = db.prepare.bind(db);
+			const spy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+				const statement = original(sql);
+				if (sql.includes("source_media_json")) {
+					const all = statement.all.bind(statement);
+					statement.all = (...args) => {
+						const rows = all(...args);
+						hydrated.push(rows.length);
+						return rows;
+					};
+				}
+				return statement;
+			});
+			try {
+				const result = getLinkInsights({ range: "all", sort, limit: 3 });
+				expect(result.items).toHaveLength(3);
+				expect(result.items[0]).toMatchObject({
+					url: "https://example.com/dm",
+					topSharer: { id: "profile_a" },
+				});
+				expect(result.items[1]?.url).toBe("https://example.com/0");
+				expect(hydrated).toEqual([3]);
+				const all = getLinkInsights({ range: "all", sort, limit: 100 });
+				expect(all.items[0]?.url).toBe(result.items[0]?.url);
+				expect(all.items.at(-1)).toMatchObject({
+					url: "https://example.com/missing",
+					totalInfluence: 0,
+				});
+			} finally {
+				spy.mockRestore();
+			}
+		},
+	);
 
 	it("applies sort before limiting groups", () => {
 		const db = insertAccountFixture();

@@ -1,3 +1,4 @@
+import { parseJsonField } from "./json-codec";
 import { getNativeDb } from "./db";
 import type { LinkInsightResponse } from "./api-contracts";
 import {
@@ -220,17 +221,6 @@ const TITLE_SMALL_WORDS = new Set([
 	"vs",
 ]);
 
-function parseJsonField<T>(value: unknown, fallback: T): T {
-	if (typeof value !== "string" || value.length === 0) {
-		return fallback;
-	}
-	try {
-		return JSON.parse(value) as T;
-	} catch {
-		return fallback;
-	}
-}
-
 function isHostMatch(host: string, suffixes: string[], exact: Set<string>) {
 	const normalized = host.toLowerCase();
 	if (exact.has(normalized)) {
@@ -395,7 +385,16 @@ function getInfluenceScore(profile: ProfileRecord | null) {
 	return Math.round(Math.log10(profile.followersCount + 10) * 24);
 }
 
-function getDetailRowInfluenceScore(row: LinkInsightRow) {
+type LinkInfluenceRow = Pick<
+	LinkInsightRow,
+	| "source_kind"
+	| "source_author_id"
+	| "source_author_followers_count"
+	| "dm_sender_id"
+	| "dm_sender_followers_count"
+>;
+
+function getDetailRowInfluenceScore(row: LinkInfluenceRow) {
 	const profileId =
 		row.source_kind === "tweet" ? row.source_author_id : row.dm_sender_id;
 	if (!profileId) return 0;
@@ -654,6 +653,14 @@ function selectHydrationCandidates(
 export function getLinkInsights(
 	query: LinkInsightQuery = {},
 ): LinkInsightResponse {
+	const normalizedUrls = new Map<string, NormalizedUrl | null>();
+	const normalize = (url: string) => {
+		const cached = normalizedUrls.get(url);
+		if (cached !== undefined) return cached;
+		const normalized = normalizeUrl(url);
+		normalizedUrls.set(url, normalized);
+		return normalized;
+	};
 	const kind = query.kind ?? "links";
 	const range = query.range ?? "week";
 	const sort = query.sort ?? "rank";
@@ -747,7 +754,7 @@ export function getLinkInsights(
 	const rankedGroups = new Map<string, RankedInsightGroup>();
 	let occurrences = 0;
 	for (const row of rankRows) {
-		const normalized = normalizeUrl(
+		const normalized = normalize(
 			row.final_url || row.expanded_url || row.short_url,
 		);
 		if (!normalized) continue;
@@ -798,6 +805,39 @@ export function getLinkInsights(
 			items: [],
 			stats: { occurrences, groups: rankedGroups.size },
 		};
+	}
+
+	let selectedGroups = preliminaryGroups;
+	// A separate query only pays off when the tie set substantially exceeds a page.
+	const needsRankingPass = preliminaryGroups.length > Math.max(limit * 2, 32);
+	if (needsRankingPass) {
+		const groupByRowId = new Map(
+			preliminaryGroups.flatMap((group) =>
+				group.rowIds.map((id) => [id, group] as const),
+			),
+		);
+		const influenceRows = db
+			.prepare(`
+      select o.rowid as occurrence_rowid, o.source_kind,
+        author.id as source_author_id, author.followers_count as source_author_followers_count,
+        sender.id as dm_sender_id, sender.followers_count as dm_sender_followers_count
+      from link_occurrences o
+      left join tweets tweet on o.source_kind = 'tweet' and tweet.id = o.source_id
+      left join profiles author on author.id = tweet.author_profile_id
+      left join dm_messages dm on o.source_kind = 'dm' and dm.id = o.source_id
+      left join profiles sender on sender.id = dm.sender_profile_id
+      where o.rowid in (select cast(value as integer) from json_each(?))
+    `)
+			.all(JSON.stringify(candidateRowIds)) as Array<
+			LinkInfluenceRow & { occurrence_rowid: number }
+		>;
+		for (const row of influenceRows) {
+			const group = groupByRowId.get(row.occurrence_rowid);
+			if (group) group.totalInfluence += getDetailRowInfluenceScore(row);
+		}
+		selectedGroups = preliminaryGroups
+			.sort(compareInsights(sort))
+			.slice(0, limit);
 	}
 
 	const rows = db
@@ -899,10 +939,12 @@ export function getLinkInsights(
 	      )
 	      order by o.created_at desc
 	    `)
-		.all(JSON.stringify(candidateRowIds)) as LinkInsightRow[];
+		.all(
+			JSON.stringify(selectedGroups.flatMap((group) => group.rowIds)),
+		) as LinkInsightRow[];
 
-	for (const row of rows) {
-		const normalized = normalizeUrl(
+	for (const row of needsRankingPass ? [] : rows) {
+		const normalized = normalize(
 			row.final_url || row.expanded_url || row.short_url,
 		);
 		if (!normalized) continue;
@@ -911,9 +953,7 @@ export function getLinkInsights(
 			rankedGroup.totalInfluence += getDetailRowInfluenceScore(row);
 		}
 	}
-	const selectedGroups = preliminaryGroups
-		.sort(compareInsights(sort))
-		.slice(0, limit);
+	selectedGroups = selectedGroups.sort(compareInsights(sort)).slice(0, limit);
 	const selectedKeys = new Set(
 		selectedGroups.map((group) => group.canonicalKey),
 	);
@@ -921,7 +961,7 @@ export function getLinkInsights(
 	const groups = new Map<string, InsightGroup>();
 	for (const row of rows) {
 		const rawUrl = row.final_url || row.expanded_url || row.short_url;
-		const normalized = normalizeUrl(rawUrl);
+		const normalized = normalize(rawUrl);
 		if (!normalized) {
 			continue;
 		}

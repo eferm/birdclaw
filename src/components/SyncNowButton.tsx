@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { postSync } from "#/lib/api-client";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 import type { AccountRecord } from "#/lib/types";
 import { cx, selectFieldClass } from "#/lib/ui";
 import type {
@@ -69,7 +70,13 @@ function readAutoSyncSettings(key: string): StoredAutoSyncSettings {
 	}
 }
 
-export function SyncNowButton({
+export function SyncNowButton(props: SyncNowButtonProps) {
+	const { readOnly, ready } = useDeploymentMode();
+	if (readOnly || !ready) return null;
+	return <WritableSyncNowButton {...props} />;
+}
+
+function WritableSyncNowButton({
 	kind,
 	label,
 	accounts,

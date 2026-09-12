@@ -63,7 +63,8 @@ function getProfileByHandle(
 	const row = db
 		.prepare(
 			`
-      select *
+      select id, handle, display_name, bio, followers_count, following_count,
+        avatar_hue, avatar_url, location, url, verified_type, entities_json, created_at
       from profiles
       where lower(handle) = lower(?)
       limit 1
@@ -73,6 +74,48 @@ function getProfileByHandle(
 	const profile = row ? profileFromDbRow(row) : null;
 	cache.set(normalized, profile);
 	return profile ?? fallbackProfileForHandle(normalized);
+}
+
+function preloadMentionProfiles(
+	db: Database,
+	cache: ProfileByHandleCache,
+	rows: Record<string, unknown>[],
+) {
+	const handles = new Set<string>();
+	for (const row of rows) {
+		for (const prefix of ["", "reply_", "quoted_"]) {
+			if (!row[`${prefix}id`]) continue;
+			const entities = parseJsonField<TweetEntities>(
+				row[`${prefix}entities_json`],
+				{},
+			);
+			for (const mention of entities.mentions ?? []) {
+				handles.add(profileHandleKey(mention.username));
+			}
+			for (const match of String(row[`${prefix}text`] ?? "").matchAll(
+				/(^|[^\w@])@([A-Za-z0-9_]{1,15})/g,
+			)) {
+				handles.add(profileHandleKey(match[2]!));
+			}
+		}
+	}
+	const missing = [...handles].filter((handle) => !cache.has(handle));
+	if (missing.length === 0) return;
+	// Keep the same first match as individual lookups when archived handles collide.
+	const profiles = db
+		.prepare(`
+		select id, handle, display_name, bio, followers_count, following_count,
+		  avatar_hue, avatar_url, location, url, verified_type, entities_json, created_at
+		from profiles
+		where rowid in (
+		  select (select rowid from profiles where lower(handle) = value limit 1)
+		  from json_each(?)
+		)
+	`)
+		.all(JSON.stringify(missing)) as Record<string, unknown>[];
+	for (const handle of missing) cache.set(handle, null);
+	for (const row of profiles)
+		cache.set(profileHandleKey(String(row.handle)), profileFromDbRow(row));
 }
 
 function spansOverlap(
@@ -177,6 +220,59 @@ function buildNoteTweet(
 	return noteTweet && { text: noteTweet.text, entities };
 }
 
+interface UrlExpansionRow {
+	short_url: string;
+	expanded_url: string;
+	final_url: string;
+	title: string | null;
+	description: string | null;
+	image_url: string | null;
+	site_name: string | null;
+}
+
+function expansionFromRow(row: UrlExpansionRow) {
+	const expandedUrl = row.final_url || row.expanded_url || row.short_url;
+	return {
+		expandedUrl,
+		displayUrl: displayUrlForLink(expandedUrl),
+		...(row.title ? { title: row.title } : {}),
+		...(row.description ? { description: row.description } : {}),
+		...(row.image_url ? { imageUrl: row.image_url } : {}),
+		...(row.site_name ? { siteName: row.site_name } : {}),
+	};
+}
+
+function preloadUrlExpansions(
+	db: Database,
+	cache: UrlExpansionCache,
+	rows: Record<string, unknown>[],
+) {
+	const urls = new Set<string>();
+	for (const row of rows) {
+		for (const prefix of ["", "reply_", "quoted_"]) {
+			if (!row[`${prefix}id`]) continue;
+			enrichFallbackUrlEntities(
+				String(row[`${prefix}text`] ?? ""),
+				parseJsonField<TweetEntities>(row[`${prefix}entities_json`], {}),
+				(url) => {
+					if (!cache.has(url)) urls.add(url);
+					return null;
+				},
+			);
+		}
+	}
+	if (urls.size === 0) return;
+	const expansions = db
+		.prepare(`
+    select short_url, expanded_url, final_url, title, description, image_url, site_name
+    from url_expansions indexed by sqlite_autoindex_url_expansions_1
+    where short_url in (select value from json_each(?)) and status = 'hit'
+  `)
+		.all(JSON.stringify([...urls])) as UrlExpansionRow[];
+	for (const url of urls) cache.set(url, null);
+	for (const row of expansions) cache.set(row.short_url, expansionFromRow(row));
+}
+
 function getUrlExpansion(
 	db: Database,
 	cache: UrlExpansionCache,
@@ -189,36 +285,19 @@ function getUrlExpansion(
 	const row = db
 		.prepare(
 			`
-      select expanded_url, final_url, title, description, image_url, site_name
+      select short_url, expanded_url, final_url, title, description, image_url, site_name
       from url_expansions
       where short_url = ?
         and status = 'hit'
       `,
 		)
-		.get(rawUrl) as
-		| {
-				expanded_url: string;
-				final_url: string;
-				title: string | null;
-				description: string | null;
-				image_url: string | null;
-				site_name: string | null;
-		  }
-		| undefined;
+		.get(rawUrl) as UrlExpansionRow | undefined;
 	if (!row) {
 		cache.set(rawUrl, null);
 		return null;
 	}
 
-	const expandedUrl = row.final_url || row.expanded_url || rawUrl;
-	const expansion = {
-		expandedUrl,
-		displayUrl: displayUrlForLink(expandedUrl),
-		...(row.title ? { title: row.title } : {}),
-		...(row.description ? { description: row.description } : {}),
-		...(row.image_url ? { imageUrl: row.image_url } : {}),
-		...(row.site_name ? { siteName: row.site_name } : {}),
-	};
+	const expansion = expansionFromRow(row);
 	cache.set(rawUrl, expansion);
 	return expansion;
 }
@@ -355,8 +434,48 @@ function parseManualRetweet(text: string) {
 	};
 }
 
+type RetweetRows = Map<string, Map<string, Record<string, unknown>>>;
+
+function preloadRetweetedTweets(
+	db: Database,
+	rows: Record<string, unknown>[],
+): RetweetRows {
+	const idsByAccount = new Map<string, Set<string>>();
+	for (const row of rows) {
+		const id = getRetweetedTweetIdFromRaw(row.edge_raw_json);
+		if (!id) continue;
+		const account = String(row.account_id);
+		const ids = idsByAccount.get(account) ?? new Set<string>();
+		ids.add(id);
+		idsByAccount.set(account, ids);
+	}
+	const result: RetweetRows = new Map();
+	for (const [account, ids] of idsByAccount) {
+		const referenced = db
+			.prepare(`${conversationTweetSelect(
+				account,
+				"",
+				`from tweets t indexed by sqlite_autoindex_tweets_1
+		join profiles p on p.id = t.author_profile_id`,
+			)}
+		where t.id in (select value from json_each(?))
+		and t.deleted_at is null and t.superseded_at is null
+		`)
+			.all(account, account, JSON.stringify([...ids])) as Record<
+			string,
+			unknown
+		>[];
+		result.set(
+			account,
+			new Map(referenced.map((row) => [String(row.id), row])),
+		);
+	}
+	return result;
+}
+
 function buildRetweetedTweet(
 	db: Database,
+	retweetRows: RetweetRows,
 	urlExpansionCache: UrlExpansionCache,
 	row: Record<string, unknown>,
 	resolveProfileByHandle: (handle: string) => ProfileRecord,
@@ -364,17 +483,16 @@ function buildRetweetedTweet(
 	const retweetedId = getRetweetedTweetIdFromRaw(row.edge_raw_json);
 	const accountId = String(row.account_id);
 	if (retweetedId) {
-		// The visible retweet edge is the account-scoped evidence for its referenced
-		// tweet. Project this account's state without requiring a second membership row.
-		const tweet = getTweetById(
-			db,
-			urlExpansionCache,
-			retweetedId,
-			resolveProfileByHandle,
-			{ stateAccountId: accountId },
-		);
-		if (tweet) {
-			return tweet;
+		// The visible retweet edge supplies membership; project only its account's state.
+		const referenced = retweetRows.get(accountId)?.get(retweetedId);
+		if (referenced) {
+			return buildEmbeddedTweet(
+				db,
+				urlExpansionCache,
+				referenced,
+				"",
+				resolveProfileByHandle,
+			);
 		}
 	}
 
@@ -652,9 +770,9 @@ export function buildTimelineItemsQuery(
         where kind = ?
 	          and tweet_id in (
             select id
-            from tweets
+            from tweets indexed by idx_tweets_created
             where deleted_at is null and superseded_at is null
-            order by created_at desc
+            order by created_at desc, id desc
 	            limit ?
 	          )
 	      )
@@ -782,28 +900,35 @@ export function buildTimelineItemsQuery(
         cross join tweets t on t.id = fts_matches.tweet_id
         cross join timeline_edges e on e.tweet_id = t.id`;
 
+	const boundedHydration =
+		Boolean(ftsSearch) || (!likedOnly && !bookmarkedOnly);
 	params.push(limit);
-	if (ftsSearch) {
-		// Outer limit; the inner search CTE consumes the first one.
-		params.push(limit);
-	}
+	if (boundedHydration) params.push(limit);
 
-	// For searches, resolve the limited id set first so the wide column list
-	// (embedded tweets, bookmark/like probes) is only evaluated for returned
-	// rows instead of every match.
-	const searchSelectionCte = ftsSearch
-		? `, search_selection as materialized (
+	// Select the page before loading embedded tweets and collection metadata.
+	const selectionName = ftsSearch ? "search_selection" : "timeline_selection";
+	const selectionFrom = ftsSearch
+		? searchDrivenFrom
+		: "timeline_edges e join tweets t on t.id = e.tweet_id";
+	const selectionCte = boundedHydration
+		? `, ${selectionName} as materialized (
         select t.id as tweet_id, e.account_id, e.kind, e.raw_json
-        from ${searchDrivenFrom}
+        from ${selectionFrom}
+        ${
+					ftsSearch
+						? ""
+						: `join accounts selected_account on selected_account.id = e.account_id
+        join profiles selected_author on selected_author.id = t.author_profile_id`
+				}
         ${where}
         order by t.created_at desc, t.id desc
         limit ?
       )`
 		: "";
 
-	const hydrationJoin = ftsSearch ? "cross join" : "join";
+	const hydrationJoin = boundedHydration ? "cross join" : "join";
 	const buildTimelineSelectSql = (timelineEdgesSql: string) => `
-      ${timelineEdgesSql}${ftsMatchesCte}${searchSelectionCte}
+      ${timelineEdgesSql}${ftsMatchesCte}${selectionCte}
       select
         t.id,
         e.account_id,
@@ -883,7 +1008,7 @@ export function buildTimelineItemsQuery(
         qp.avatar_hue as quoted_avatar_hue,
         qp.avatar_url as quoted_avatar_url,
         qp.created_at as quoted_profile_created_at
-      from ${ftsSearch ? "search_selection e" : "timeline_edges e"}
+      from ${boundedHydration ? selectionName : "timeline_edges"} e
       ${hydrationJoin} tweets t on t.id = e.tweet_id
       ${hydrationJoin} accounts a on a.id = e.account_id
       ${hydrationJoin} profiles p on p.id = t.author_profile_id
@@ -891,7 +1016,7 @@ export function buildTimelineItemsQuery(
       left join profiles rp on rp.id = rt.author_profile_id
       left join tweets qt on qt.id = t.quoted_tweet_id and qt.deleted_at is null and qt.superseded_at is null
       left join profiles qp on qp.id = qt.author_profile_id
-      ${ftsSearch ? "" : where}
+      ${boundedHydration ? "" : where}
       order by t.created_at desc, t.id desc
       limit ?
       `;
@@ -1052,8 +1177,15 @@ export function listTimelineItems(
 		}
 	}
 
+	const retweetRows = preloadRetweetedTweets(db, rows);
+	const enrichmentRows = [
+		...rows,
+		...[...retweetRows.values()].flatMap((byId) => [...byId.values()]),
+	];
 	const urlExpansionCache: UrlExpansionCache = new Map();
+	preloadUrlExpansions(db, urlExpansionCache, enrichmentRows);
 	const profileByHandleCache: ProfileByHandleCache = new Map();
+	preloadMentionProfiles(db, profileByHandleCache, enrichmentRows);
 	const items = rows.map((row) => {
 		const author = {
 			id: String(row.profile_id),
@@ -1148,6 +1280,7 @@ export function listTimelineItems(
 			),
 			retweetedTweet: buildRetweetedTweet(
 				db,
+				retweetRows,
 				urlExpansionCache,
 				row,
 				resolveProfileByHandle,
@@ -1350,30 +1483,50 @@ export function getTweetsByIds(
 	const profileByHandleCache: ProfileByHandleCache = new Map();
 	const resolveProfileByHandle = (handle: string) =>
 		getProfileByHandle(db, profileByHandleCache, handle);
-	const seen = new Set<string>();
+	const uniqueIds = [
+		...new Set(
+			tweetIds.map((id) => id.trim().replace(/^tweet_/, "")).filter(Boolean),
+		),
+	];
 	const tweets: EmbeddedTweet[] = [];
-
-	for (const tweetId of tweetIds) {
-		const normalized = tweetId.trim().replace(/^tweet_/, "");
-		if (!normalized || seen.has(normalized)) continue;
-		seen.add(normalized);
-		if (
-			scopedAccountId !== undefined &&
-			!hasTweetAccountMembership(db, normalized, scopedAccountId)
-		) {
-			continue;
+	const accountParams =
+		scopedAccountId !== undefined ? [scopedAccountId, scopedAccountId] : [];
+	const membershipClause =
+		scopedAccountId !== undefined
+			? `and ${tweetAccountMembershipPredicate("t")}`
+			: "";
+	// Explicit ID batches must not scan the active-tweet edit index.
+	const selectSql = conversationTweetSelect(
+		scopedAccountId,
+		"",
+		`from tweets t indexed by sqlite_autoindex_tweets_1
+    join profiles p on p.id = t.author_profile_id`,
+	);
+	for (let offset = 0; offset < uniqueIds.length; offset += 500) {
+		const batch = uniqueIds.slice(offset, offset + 500);
+		const rows = db
+			.prepare(`${selectSql}
+			where t.id in (${batch.map(() => "?").join(",")})
+			and t.deleted_at is null and t.superseded_at is null ${membershipClause}`)
+			.all(...accountParams, ...batch, ...accountParams) as Record<
+			string,
+			unknown
+		>[];
+		const byId = new Map(rows.map((row) => [String(row.id), row]));
+		preloadUrlExpansions(db, urlExpansionCache, rows);
+		preloadMentionProfiles(db, profileByHandleCache, rows);
+		for (const id of batch) {
+			const row = byId.get(id);
+			if (!row) continue;
+			const tweet = buildEmbeddedTweet(
+				db,
+				urlExpansionCache,
+				row,
+				"",
+				resolveProfileByHandle,
+			);
+			if (tweet) tweets.push(tweet);
 		}
-		const tweet = getTweetById(
-			db,
-			urlExpansionCache,
-			normalized,
-			resolveProfileByHandle,
-			{
-				stateAccountId: scopedAccountId,
-				membershipAccountId: scopedAccountId,
-			},
-		);
-		if (tweet) tweets.push(tweet);
 	}
 
 	return tweets;
@@ -1382,9 +1535,9 @@ export function getTweetsByIds(
 function listTweetDescendants(
 	db: Database,
 	urlExpansionCache: UrlExpansionCache,
+	profileByHandleCache: ProfileByHandleCache,
 	rootId: string,
 	limit: number,
-	resolveProfileByHandle?: (handle: string) => ProfileRecord,
 	accountId?: string,
 ) {
 	const visibleLimit = Number.isFinite(limit)
@@ -1502,8 +1655,12 @@ function listTweetDescendants(
 		) as Array<Record<string, unknown>>;
 
 	const visibleRows = rows.filter((row) => typeof row.id === "string");
-	const items = visibleRows
-		.slice(0, visibleLimit)
+	const selectedRows = visibleRows.slice(0, visibleLimit);
+	preloadUrlExpansions(db, urlExpansionCache, selectedRows);
+	preloadMentionProfiles(db, profileByHandleCache, selectedRows);
+	const resolveProfileByHandle = (handle: string) =>
+		getProfileByHandle(db, profileByHandleCache, handle);
+	const items = selectedRows
 		.map((row) =>
 			buildEmbeddedTweet(
 				db,
@@ -1623,9 +1780,9 @@ export function getTweetConversation(
 	const focusedDescendants = listTweetDescendants(
 		db,
 		urlExpansionCache,
+		profileByHandleCache,
 		anchor.id,
 		remainingAfterRequired,
-		resolveProfileByHandle,
 		scopedAccountId,
 	);
 	const focusedDescendantsDropped = appendConversationTweets(
@@ -1641,9 +1798,9 @@ export function getTweetConversation(
 		const ambientDescendants = listTweetDescendants(
 			db,
 			urlExpansionCache,
+			profileByHandleCache,
 			root.id,
 			limit,
-			resolveProfileByHandle,
 			scopedAccountId,
 		);
 		const ambientDescendantsDropped = appendConversationTweets(

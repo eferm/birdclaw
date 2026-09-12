@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+export const READ_ONLY_ARCHIVE_PAGES: readonly string[] = [
+	"/",
+	"/inbox",
+	"/mentions",
+	"/likes",
+	"/bookmarks",
+	"/links",
+	"/dms",
+	"/blocks",
+	"/network-map",
+];
+
 export const resourceKindSchema = z.enum([
 	"home",
 	"mentions",

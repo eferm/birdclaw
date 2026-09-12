@@ -31,6 +31,7 @@ import {
 } from "#/lib/ui";
 import { AvatarChip } from "./AvatarChip";
 import { SmartTimestamp } from "./SmartTimestamp";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 
 export function InboxCard({
 	item,
@@ -47,6 +48,7 @@ export function InboxCard({
 	onReplyToggle: () => void;
 	onReplySend: () => void;
 }) {
+	const { readOnly } = useDeploymentMode();
 	return (
 		<article className={cx(feedRowClass, "items-start")}>
 			<AvatarChip
@@ -105,6 +107,7 @@ export function InboxCard({
 					<div className="flex items-center gap-2">
 						<button
 							className={secondaryButtonClass}
+							hidden={readOnly}
 							onClick={onReplyToggle}
 							type="button"
 						>
@@ -120,7 +123,7 @@ export function InboxCard({
 						</Link>
 					</div>
 				</div>
-				{isReplying ? (
+				{isReplying && !readOnly ? (
 					<div className={composerShellClass}>
 						<textarea
 							className={composerInputClass}

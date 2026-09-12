@@ -95,10 +95,6 @@ export async function fetchMap(
 	);
 }
 
-export function formatNumber(value: number) {
-	return new Intl.NumberFormat().format(value);
-}
-
 export function formatRelationship(
 	value: MapFeature["properties"]["relationship"],
 ) {
@@ -113,21 +109,6 @@ export function relationshipColor(
 	if (relationship === "mutual") return "#22c55e";
 	if (relationship === "following") return "#f59e0b";
 	return "#1d9bf0";
-}
-
-export function avatarInitial(feature: MapFeature) {
-	return (feature.properties.name || feature.properties.handle || "?")
-		.slice(0, 1)
-		.toUpperCase();
-}
-
-export function avatarPath(feature: MapFeature) {
-	if (!feature.properties.avatarUrl) return null;
-	const query = new URLSearchParams({
-		profileId: feature.properties.profileId,
-		v: feature.properties.avatarUrl,
-	});
-	return `/api/avatar?${query.toString()}`;
 }
 
 export function clusterGradient(stats: ClusterAggregateProperties) {

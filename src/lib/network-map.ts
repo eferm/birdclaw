@@ -1,4 +1,5 @@
 import { getNativeDb } from "./db";
+import { isReadOnlyDeployment } from "./config";
 import { resolveOperationAccount } from "./account-selection";
 import type { NetworkMapResponse } from "./api-contracts";
 import {
@@ -188,6 +189,16 @@ async function fillMissingGeocodes({
 }) {
 	const cache = readCachedGeocodes(keys, db);
 	const suppressed = readSuppressedGeocodeKeys(keys, db);
+	if (isReadOnlyDeployment()) {
+		return {
+			cache,
+			missingCount: keys.filter(
+				(key) => !cache.has(key) && !suppressed.has(key),
+			).length,
+			suppressedCount: suppressed.size,
+			geocoded: 0,
+		};
+	}
 	const coordinateKeys = keys.filter(
 		(key) => key.startsWith("coords:") && (refresh || !cache.has(key)),
 	);

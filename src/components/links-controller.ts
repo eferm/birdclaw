@@ -3,6 +3,7 @@ import { useEffect, useMemo } from "react";
 import { formatCompactNumber } from "#/lib/present";
 import { hydrateProfileHandles } from "#/lib/profile-hydration-client";
 import { queryKeys } from "#/lib/query-client";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 import type { LinksRouteSearch, RouteSearchChange } from "#/lib/route-search";
 import type {
 	LinkInsightKind,
@@ -24,6 +25,7 @@ export function useLinksController(
 	onFiltersChange: RouteSearchChange<LinksRouteSearch>,
 ) {
 	const queryClient = useQueryClient();
+	const { readOnly } = useDeploymentMode();
 	const { kind, range, source, sort, q: search } = filters;
 	const insightsQuery = useQuery({
 		queryKey: linkInsightQueryKey(kind, range, sort, source),
@@ -49,7 +51,7 @@ export function useLinksController(
 
 	useEffect(() => {
 		const handles = collectProfilesForHydration(data);
-		if (handles.length === 0) return;
+		if (readOnly || handles.length === 0) return;
 
 		let active = true;
 		let idleId: number | null = null;
@@ -87,7 +89,7 @@ export function useLinksController(
 				window.cancelIdleCallback(idleId);
 			}
 		};
-	}, [data, queryClient]);
+	}, [data, queryClient, readOnly]);
 
 	const items = useMemo(() => {
 		const query = search.trim().toLowerCase();

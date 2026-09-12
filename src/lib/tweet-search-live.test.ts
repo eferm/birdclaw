@@ -214,6 +214,84 @@ describe("live tweet search sync", () => {
 		).toEqual({ count: 2 });
 	});
 
+	it("retains each xurl page before a later failure without caching an incomplete search", async () => {
+		const db = getNativeDb();
+		mocks.searchRecentTweets
+			.mockResolvedValueOnce(payload(["retained"], "next"))
+			.mockImplementationOnce(() => {
+				expect(
+					db.prepare("select text from tweets where id = ?").get("retained"),
+				).toEqual({ text: "Search result retained about local-first systems" });
+				throw new Error("402 credits depleted");
+			});
+		const { syncTweetSearch } = await import("./tweet-search-live");
+		const options = {
+			query: "retained",
+			mode: "xurl" as const,
+			limit: 150,
+			maxPages: 2,
+		};
+		const result = await syncTweetSearch(options);
+		expect(result).toMatchObject({
+			ok: false,
+			error:
+				"Xurl search stopped after saving 1 page(s) and 1 unique tweet(s) locally. 402 credits depleted",
+		});
+		expect(
+			db
+				.prepare(
+					"select kind, source from tweet_account_edges where tweet_id = ?",
+				)
+				.get("retained"),
+		).toEqual({ kind: "search", source: "xurl" });
+		expect(
+			db
+				.prepare(
+					"select count(*) as count from tweets_fts where tweets_fts match 'retained'",
+				)
+				.get(),
+		).toEqual({ count: 1 });
+		expect(
+			db
+				.prepare(
+					"select count(*) as count from sync_cache where cache_key like 'tweet-search:%'",
+				)
+				.get(),
+		).toEqual({ count: 0 });
+		mocks.searchRecentTweets.mockResolvedValueOnce(
+			payload(["retained", "resumed"]),
+		);
+		expect(await syncTweetSearch(options)).toMatchObject({
+			ok: true,
+			source: "xurl",
+			count: 2,
+		});
+		expect(mocks.searchRecentTweets).toHaveBeenCalledTimes(3);
+	});
+
+	it("counts retained tweets once across overlapping pages on failure", async () => {
+		mocks.searchRecentTweets
+			.mockResolvedValueOnce(payload(["retained"], "second"))
+			.mockResolvedValueOnce(payload(["retained", "another"], "third"))
+			.mockRejectedValueOnce(new Error("network unavailable"));
+		const { syncTweetSearch } = await import("./tweet-search-live");
+
+		expect(
+			await syncTweetSearch({ query: "retained", mode: "xurl", maxPages: 3 }),
+		).toMatchObject({
+			ok: false,
+			error:
+				"Xurl search stopped after saving 2 page(s) and 2 unique tweet(s) locally. network unavailable",
+		});
+		expect(
+			getNativeDb()
+				.prepare(
+					"select count(*) as count from tweet_account_edges where kind = 'search' and source = 'xurl'",
+				)
+				.get(),
+		).toEqual({ count: 2 });
+	});
+
 	it("combines bird and xurl results for auto searches", async () => {
 		mocks.searchTweetsViaBird.mockResolvedValue(
 			payload(["tweet_bird_1", "tweet_shared", "tweet_bird_2"]),

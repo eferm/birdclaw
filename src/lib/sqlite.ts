@@ -7,6 +7,7 @@ type DatabaseOptions = {
 	fileMustExist?: boolean;
 	timeout?: number;
 	onStatement?: (sql: string, durationMs: number) => void;
+	onBatch?: (durationMs: number) => void;
 };
 
 type PragmaOptions = {
@@ -19,6 +20,7 @@ type RunResult = {
 };
 
 export const SQLITE_BUSY_TIMEOUT_MS = 30_000;
+const STATEMENT_CACHE_LIMIT = 128;
 
 function bindArgs(parameters: unknown[]) {
 	if (parameters.length === 1 && Array.isArray(parameters[0])) {
@@ -43,24 +45,23 @@ function normalizeRow(row: unknown): unknown {
 	) {
 		return normalizeValue(row);
 	}
-	return Object.fromEntries(
-		Object.entries(row as Record<string, unknown>).map(([key, value]) => [
-			key,
-			normalizeValue(value),
-		]),
-	);
+	const record = row as Record<string, unknown>;
+	for (const key of Object.keys(record)) {
+		const value = record[key];
+		if (value instanceof Uint8Array && !Buffer.isBuffer(value)) {
+			record[key] = normalizeValue(value);
+		}
+	}
+	return Object.setPrototypeOf(record, Object.prototype);
 }
 
 class NativeSqliteStatement {
-	readonly reader: boolean;
-
 	constructor(
 		private readonly statement: StatementSync,
 		private readonly sql: string,
+		private readonly prepareIterator: () => StatementSync,
 		private readonly onStatement?: (sql: string, durationMs: number) => void,
-	) {
-		this.reader = statement.columns().length > 0;
-	}
+	) {}
 
 	private track<T>(operation: () => T) {
 		const startedAt = performance.now();
@@ -94,7 +95,8 @@ class NativeSqliteStatement {
 	}
 
 	iterate(...parameters: unknown[]): IterableIterator<unknown> {
-		const rows = this.statement.iterate(...bindArgs(parameters));
+		// Iterators own their native cursor so nested reads cannot reset it.
+		const rows = this.prepareIterator().iterate(...bindArgs(parameters));
 		const startedAt = performance.now();
 		const onStatement = this.onStatement;
 		const sql = this.sql;
@@ -114,6 +116,7 @@ export class NativeSqliteDatabase {
 	readonly writeIdentity: string | object;
 	private transactionDepth = 0;
 	private readonly db: DatabaseSync;
+	private readonly statements = new Map<string, StatementSync>();
 
 	constructor(
 		path: string,
@@ -130,11 +133,21 @@ export class NativeSqliteDatabase {
 		if (!this.db.isOpen) {
 			return;
 		}
+		this.statements.clear();
 		this.db.close();
 	}
 
 	exec(sql: string): void {
-		this.db.exec(sql);
+		if (!this.options.onBatch) {
+			this.db.exec(sql);
+			return;
+		}
+		const startedAt = performance.now();
+		try {
+			this.db.exec(sql);
+		} finally {
+			this.options.onBatch(performance.now() - startedAt);
+		}
 	}
 
 	pragma(sql: string, options: PragmaOptions = {}): unknown {
@@ -149,9 +162,20 @@ export class NativeSqliteDatabase {
 	}
 
 	prepare(sql: string): NativeSqliteStatement {
+		let statement = this.statements.get(sql);
+		if (statement) {
+			this.statements.delete(sql);
+		} else {
+			statement = this.db.prepare(sql);
+			if (this.statements.size >= STATEMENT_CACHE_LIMIT) {
+				this.statements.delete(this.statements.keys().next().value!);
+			}
+		}
+		this.statements.set(sql, statement);
 		return new NativeSqliteStatement(
-			this.db.prepare(sql),
+			statement,
 			sql,
+			() => this.db.prepare(sql),
 			this.options.onStatement,
 		);
 	}

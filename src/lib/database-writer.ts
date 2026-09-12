@@ -1,4 +1,5 @@
 import { Effect } from "effect";
+import { assertWritableDeployment } from "./config";
 import type { Database } from "./sqlite";
 import {
 	defaultServerRuntimeServices,
@@ -17,12 +18,18 @@ export function enqueueDatabaseWrite<T>(
 	providedDb?: Database,
 	runtime: ServerRuntimeServices = defaultServerRuntimeServices,
 ): Promise<T> {
+	try {
+		assertWritableDeployment();
+	} catch (error) {
+		return Promise.reject(error);
+	}
 	const db = providedDb ?? runtime.getDatabase({ seedDemoData: false });
 	const writeIdentity = db.writeIdentity;
 	const queuedAt = performance.now();
 	recordDatabaseWriteQueued();
 	const writeTail = writeTails.get(writeIdentity) ?? Promise.resolve();
 	const pending = writeTail.then(() => {
+		assertWritableDeployment();
 		recordDatabaseWriteStarted(performance.now() - queuedAt);
 		try {
 			const result = db.transaction(() => write(db))();

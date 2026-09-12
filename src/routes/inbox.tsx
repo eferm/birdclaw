@@ -7,11 +7,12 @@ import {
 } from "@tanstack/react-query";
 import { Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
-import { useSelectedAccountId } from "#/components/account-selection";
+import { useQueryAccount } from "#/components/account-selection";
 import { InboxCard } from "#/components/InboxCard";
 import { inboxResponseSchema } from "#/lib/api-contracts";
 import { fetchJson, fetchQueryEnvelope, postAction } from "#/lib/api-client";
 import { queryKeys } from "#/lib/query-client";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 import {
 	type InboxRouteSearch,
 	type RouteSearchChange,
@@ -69,6 +70,7 @@ export function InboxRouteView({
 	onSearchChange?: RouteSearchChange<InboxRouteSearch>;
 } = {}) {
 	const queryClient = useQueryClient();
+	const { readOnly } = useDeploymentMode();
 	const [localSearch, setLocalSearch] = useState(() => validateInboxSearch({}));
 	const searchState = controlledSearch ?? localSearch;
 	const updateSearch: RouteSearchChange<InboxRouteSearch> = (next, options) =>
@@ -83,7 +85,8 @@ export function InboxRouteView({
 		queryFn: ({ signal }) => fetchQueryEnvelope({ signal }),
 	});
 	const meta = statusQuery.data ?? null;
-	const selectedAccountId = useSelectedAccountId(meta?.accounts);
+	const { selectedAccountId, accountSelectionSettled } =
+		useQueryAccount(statusQuery);
 	const inboxQueryKey = [
 		...queryKeys.inbox,
 		{
@@ -95,6 +98,7 @@ export function InboxRouteView({
 	] as const;
 	const inboxQuery = useQuery({
 		queryKey: inboxQueryKey,
+		enabled: accountSelectionSettled,
 		queryFn: async ({ signal }) => {
 			const url = new URL("/api/inbox", window.location.origin);
 			url.searchParams.set("kind", kind);
@@ -179,6 +183,7 @@ export function InboxRouteView({
 					<button
 						className={primaryButtonClass}
 						disabled={scoreMutation.isPending}
+						hidden={readOnly}
 						onClick={() => void scoreNow()}
 						type="button"
 					>

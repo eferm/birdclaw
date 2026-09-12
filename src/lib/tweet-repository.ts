@@ -52,22 +52,6 @@ function serializeNoteTweet(noteTweet: XurlMentionData["note_tweet"]) {
 	});
 }
 
-function replaceTweetFts(db: Database, tweetId: string) {
-	db.prepare("delete from tweets_fts where tweet_id = ?").run(tweetId);
-	const row = db
-		.prepare("select text, deleted_at, superseded_at from tweets where id = ?")
-		.get(tweetId) as {
-		text: string;
-		deleted_at: string | null;
-		superseded_at: string | null;
-	};
-	if (row.deleted_at || row.superseded_at) return;
-	db.prepare("insert into tweets_fts (tweet_id, text) values (?, ?)").run(
-		tweetId,
-		row.text,
-	);
-}
-
 export function ingestTweetPayload(
 	db: Database,
 	{
@@ -204,10 +188,22 @@ export function ingestTweetPayload(
 					observedAt,
 				);
 			}
-			replaceTweetFts(db, tweet.id);
 			if (isPrimaryTweet) {
 				tweetIds.push(tweet.id);
 			}
+		}
+		if (touchedTweetIds.length > 0) {
+			const ids = JSON.stringify(touchedTweetIds);
+			// tweet_id is unindexed in FTS5: scan once per payload, not once per tweet.
+			db.prepare(
+				"delete from tweets_fts where tweet_id in (select value from json_each(?))",
+			).run(ids);
+			db.prepare(`
+				insert into tweets_fts (tweet_id, text)
+				select id, text from tweets
+				where id in (select value from json_each(?))
+				  and deleted_at is null and superseded_at is null
+			`).run(ids);
 		}
 		reconcileTweetTombstones(db, touchedTweetIds);
 	})();

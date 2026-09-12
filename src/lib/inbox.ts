@@ -38,16 +38,25 @@ function getHeuristicScoreForDm(
 	);
 }
 
-function readStoredScores() {
+function readStoredScores(mentions: string[], conversations: string[]) {
 	const db = getNativeDb();
+	const candidates = [
+		...mentions.map((id) => ["mention", id]),
+		...conversations.map((id) => ["dm", id]),
+	];
+	if (candidates.length === 0) return new Map();
 	const rows = db
 		.prepare(
 			`
       select entity_kind, entity_id, model, score, summary, reasoning, updated_at
       from ai_scores
+      where (entity_kind, entity_id) in (
+        select json_extract(value, '$[0]'), json_extract(value, '$[1]')
+        from json_each(?)
+      )
       `,
 		)
-		.all() as Array<Record<string, unknown>>;
+		.all(JSON.stringify(candidates)) as Array<Record<string, unknown>>;
 
 	return new Map(
 		rows.map((row) => [
@@ -70,16 +79,32 @@ export function listInboxItems({
 	hideLowSignal = false,
 	limit = 20,
 }: InboxQuery = {}): InboxResponse {
-	const storedScores = readStoredScores();
+	const mentions =
+		kind === "mixed" || kind === "mentions"
+			? listTimelineItems({
+					resource: "mentions",
+					account,
+					replyFilter: "unreplied",
+					limit: 50,
+				})
+			: [];
+	const conversations =
+		kind === "mixed" || kind === "dms"
+			? listDmConversations({
+					account,
+					replyFilter: "unreplied",
+					sort: "followers",
+					limit: 50,
+				})
+			: [];
+	const storedScores = readStoredScores(
+		mentions.map((item) => item.id),
+		conversations.map((item) => item.id),
+	);
 	const items: InboxItem[] = [];
 
 	if (kind === "mixed" || kind === "mentions") {
-		for (const mention of listTimelineItems({
-			resource: "mentions",
-			account,
-			replyFilter: "unreplied",
-			limit: 50,
-		})) {
+		for (const mention of mentions) {
 			const scoreKey = `mention:${mention.id}`;
 			const stored = storedScores.get(scoreKey);
 			items.push({
@@ -107,12 +132,7 @@ export function listInboxItems({
 	}
 
 	if (kind === "mixed" || kind === "dms") {
-		for (const dm of listDmConversations({
-			account,
-			replyFilter: "unreplied",
-			sort: "followers",
-			limit: 50,
-		})) {
+		for (const dm of conversations) {
 			const scoreKey = `dm:${dm.id}`;
 			const stored = storedScores.get(scoreKey);
 			items.push({

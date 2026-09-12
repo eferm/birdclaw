@@ -37,6 +37,8 @@ import {
 import { AccountSwitcher } from "./AccountSwitcher";
 import { BirdclawMark } from "./BrandMark";
 import { ThemeSlider } from "./ThemeSlider";
+import { READ_ONLY_ARCHIVE_PAGES } from "#/lib/api-enums";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 
 const links = [
 	{ to: "/inbox", label: "Inbox", icon: Inbox },
@@ -56,6 +58,7 @@ const links = [
 ] as const;
 
 export function AppNav({ compact = false }: { compact?: boolean }) {
+	const { readOnly } = useDeploymentMode();
 	const pathname = useRouterState({
 		select: (state) => state.location.pathname,
 	});
@@ -74,40 +77,44 @@ export function AppNav({ compact = false }: { compact?: boolean }) {
 					>
 						<span className={sidebarBrandTitleClass}>birdclaw</span>
 						<span className={sidebarBrandTaglineClass}>
-							Fast search for your archive.
+							{readOnly ? "Read-only archive" : "Fast search for your archive."}
 						</span>
 					</span>
 				</Link>
 				<nav className={sidebarNavClass} aria-label="Primary">
-					{links.map((link) => {
-						const active = pathname === link.to;
-						const Icon = link.icon;
-						return (
-							<Link
-								key={link.to}
-								to={link.to}
-								aria-label={link.label}
-								className={cx(
-									compact ? navLinkCompactClass : navLinkClass,
-									active && navLinkActiveClass,
-								)}
-							>
-								<Icon
-									className={navLinkIconClass}
-									size={22}
-									strokeWidth={active ? 2.4 : 1.8}
-									aria-hidden="true"
-								/>
-								<span
-									className={
-										compact ? navLinkLabelCompactClass : navLinkLabelClass
-									}
+					{links
+						.filter(
+							(link) => !readOnly || READ_ONLY_ARCHIVE_PAGES.includes(link.to),
+						)
+						.map((link) => {
+							const active = pathname === link.to;
+							const Icon = link.icon;
+							return (
+								<Link
+									key={link.to}
+									to={link.to}
+									aria-label={link.label}
+									className={cx(
+										compact ? navLinkCompactClass : navLinkClass,
+										active && navLinkActiveClass,
+									)}
 								>
-									{link.label}
-								</span>
-							</Link>
-						);
-					})}
+									<Icon
+										className={navLinkIconClass}
+										size={22}
+										strokeWidth={active ? 2.4 : 1.8}
+										aria-hidden="true"
+									/>
+									<span
+										className={
+											compact ? navLinkLabelCompactClass : navLinkLabelClass
+										}
+									>
+										{link.label}
+									</span>
+								</Link>
+							);
+						})}
 				</nav>
 			</div>
 			<div className={sidebarFooterClass}>

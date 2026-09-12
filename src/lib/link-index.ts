@@ -1,3 +1,4 @@
+import { parseJsonField } from "./json-codec";
 import { Effect } from "effect";
 import { getNativeDb } from "./db";
 import { runEffectPromise, tryPromise } from "./effect-runtime";
@@ -70,18 +71,6 @@ export interface LinkSearchOptions {
 	participant?: string;
 	mediaType?: "image" | "video" | "gif";
 	limit?: number;
-}
-
-function parseJsonField<T>(value: unknown, fallback: T): T {
-	if (typeof value !== "string" || value.length === 0) {
-		return fallback;
-	}
-
-	try {
-		return JSON.parse(value) as T;
-	} catch {
-		return fallback;
-	}
 }
 
 function getString(value: unknown) {
@@ -575,7 +564,11 @@ export function searchLinks(query: string, options: LinkSearchOptions = {}) {
 				(select edge.account_id from tweet_account_edges edge where edge.tweet_id = linked.id order by edge.last_seen_at desc limit 1),
 				(select collection.account_id from tweet_collections collection where collection.tweet_id = linked.id order by collection.updated_at desc limit 1)
 			) as linked_account_id,
-			linked_account.handle as linked_account_handle,
+			(select linked_account.handle from accounts linked_account where linked_account.id = coalesce(
+				o.account_id,
+				(select edge.account_id from tweet_account_edges edge where edge.tweet_id = linked.id order by edge.last_seen_at desc limit 1),
+				(select collection.account_id from tweet_collections collection where collection.tweet_id = linked.id order by collection.updated_at desc limit 1)
+			)) as linked_account_handle,
 			coalesce(
 				(select edge.kind from tweet_account_edges edge where edge.tweet_id = linked.id order by edge.last_seen_at desc limit 1),
 				'thread'
@@ -617,12 +610,6 @@ export function searchLinks(query: string, options: LinkSearchOptions = {}) {
       on source_author.id = source_tweet.author_profile_id
     left join tweets linked
       on linked.id = e.expanded_tweet_id
-		left join accounts linked_account
-			on linked_account.id = coalesce(
-				o.account_id,
-				(select edge.account_id from tweet_account_edges edge where edge.tweet_id = linked.id order by edge.last_seen_at desc limit 1),
-				(select collection.account_id from tweet_collections collection where collection.tweet_id = linked.id order by collection.updated_at desc limit 1)
-			)
     left join profiles linked_author
       on linked_author.id = linked.author_profile_id
     ${conditions.length > 0 ? `where ${conditions.join(" and ")}` : ""}

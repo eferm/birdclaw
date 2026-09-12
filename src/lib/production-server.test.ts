@@ -99,6 +99,7 @@ async function closeServer(
 }
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	if (originalLocalWeb === undefined) delete process.env.BIRDCLAW_LOCAL_WEB;
 	else process.env.BIRDCLAW_LOCAL_WEB = originalLocalWeb;
 	if (originalAllowRemoteWeb === undefined)
@@ -110,6 +111,64 @@ afterEach(() => {
 });
 
 describe("production server", () => {
+	it("admits cached reads and assets but rejects mutation and live API handlers only in read-only mode", async () => {
+		const packageRoot = mkdtempSync(
+			path.join(os.tmpdir(), "birdclaw-read-only-http-"),
+		);
+		tempDirs.push(packageRoot);
+		const clientDir = path.join(packageRoot, "client");
+		mkdirSync(clientDir);
+		writeFileSync(path.join(clientDir, "birdclaw-mark.png"), "static logo");
+		const serverEntry = path.join(packageRoot, "server.mjs");
+		writeFileSync(
+			serverEntry,
+			'export default {fetch(){return new Response("handler reached")}}',
+		);
+		vi.stubEnv("BIRDCLAW_DEPLOYMENT_READ_ONLY", "1");
+		const server = await startProductionServer({
+			packageRoot,
+			clientDir,
+			serverEntry,
+			port: 0,
+			mcpRuntime: null,
+		});
+		try {
+			const base = `http://127.0.0.1:${serverAddress(server).port}`;
+			for (const pathname of [
+				"/api/query",
+				"/api/status",
+				"/api/conversation",
+				"/birdclaw-mark.png",
+			]) {
+				expect((await fetch(base + pathname)).status).toBe(200);
+			}
+			for (const pathname of ["/api/action", "/api/sync", "/api/query"]) {
+				for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+					const result = await fetch(base + pathname, { method });
+					expect(result.status).toBe(405);
+					expect(await result.text()).not.toContain("handler reached");
+				}
+			}
+			for (const pathname of [
+				"/api/period-digest",
+				"/api/search-discussion",
+				"/api/profile-analysis",
+				"/api/profile-hydrate",
+				"/api/data-sources",
+				"/api/xurl-rate-limits",
+			]) {
+				expect((await fetch(base + pathname)).status).toBe(403);
+			}
+			vi.stubEnv("BIRDCLAW_DEPLOYMENT_READ_ONLY", "0");
+			expect(
+				await fetch(base + "/api/action", { method: "POST" }).then((value) =>
+					value.text(),
+				),
+			).toBe("handler reached");
+		} finally {
+			await closeServer(server);
+		}
+	});
 	it("serves built assets before delegating requests to the SSR handler", async () => {
 		const packageRoot = mkdtempSync(
 			path.join(os.tmpdir(), "birdclaw-production-server-"),

@@ -24,3 +24,6 @@ birdclaw sync following --yes --json
 birdclaw import hydrate-profiles --json
 ./scripts/bun-canary.sh run --bun dev
 ```
+
+Profile avatars in markers, clusters, popups, and the visible-people list follow
+the same [cache and fallback rules](media.md#avatars) as other profile views.

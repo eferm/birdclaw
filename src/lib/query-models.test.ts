@@ -6,8 +6,13 @@ import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetBirdclawPathsForTests } from "./config";
 import { getNativeDb, resetDatabaseForTests } from "./db";
+import { NativeSqliteDatabase } from "./sqlite";
 import { listInboxItems } from "./inbox";
-import { getConversationThread, listDmConversations } from "./dm-read-model";
+import {
+	getConversationThread,
+	listDmConversations,
+	decodeDmMessageCursor,
+} from "./dm-read-model";
 import {
 	applyDmRequestMutationToLocalStore,
 	createDmReply,
@@ -22,6 +27,7 @@ import { getQueryEnvelope, getQueryEnvelopeEffect } from "./query-status";
 import {
 	buildTimelineItemsQuery,
 	getTweetConversation,
+	getTweetsByIds,
 	listTimelineItems,
 	TimelineCandidateLimitError,
 } from "./timeline-read-model";
@@ -429,6 +435,33 @@ describe("query models", () => {
 		);
 	});
 
+	it("keeps the latest three DM matches when ranking a large matching thread", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const insert = db.prepare(
+			"insert into dm_messages(id, conversation_id, sender_profile_id, text, created_at, direction, is_replied, media_count) values (?, 'dm_001', 'profile_me', 'rankneedle', '2030-01-01', 'outbound', 0, 0)",
+		);
+		db.transaction(() => {
+			for (let i = 0; i < 1000; i++) {
+				const id = `rank_${String(i).padStart(4, "0")}`;
+				insert.run(id);
+				db.prepare(
+					"insert into dm_fts(message_id, text) values (?, 'rankneedle')",
+				).run(id);
+			}
+		})();
+		const result = listDmConversations({ search: "rankneedle", context: 1 });
+		expect(result).toHaveLength(1);
+		expect(result[0]?.matches?.map((match) => match.message.id)).toEqual([
+			"rank_0999",
+			"rank_0998",
+			"rank_0997",
+		]);
+		expect(result[0]?.matches?.[0]?.before[0]?.id).toBe("rank_0998");
+		expect(result[0]?.matches?.[0]?.after).toEqual([]);
+		expect(result[0]?.matches?.[2]?.message.sender.id).toBe("profile_me");
+	});
+
 	it("returns nearby DM context when requested for search results", () => {
 		setupTempHome();
 		const db = getNativeDb();
@@ -634,6 +667,76 @@ describe("query models", () => {
 		}
 	});
 
+	it("limits timeline membership before hydrating embedded metadata", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		for (const filters of [
+			{ account: "acct_primary" },
+			{},
+			{ replyFilter: "unreplied" as const },
+		]) {
+			const plan = buildTimelineItemsQuery({
+				resource: "home",
+				limit: 2,
+				...filters,
+			});
+			const rows = db
+				.prepare(`explain query plan ${plan.sql}`)
+				.all(...plan.params) as Array<{
+				id: number;
+				parent: number;
+				detail: string;
+			}>;
+			const selection = rows.find(
+				(row) => row.detail === "MATERIALIZE timeline_selection",
+			);
+			expect(selection).toBeDefined();
+			const parents = new Map(rows.map((row) => [row.id, row.parent]));
+			for (const row of rows.filter((row) =>
+				/SEARCH (rt|qt|rp|qp|collection) USING/.test(row.detail),
+			)) {
+				let parent = row.parent;
+				while (parent) {
+					expect(parent).not.toBe(selection?.id);
+					parent = parents.get(parent) ?? 0;
+				}
+			}
+		}
+	});
+
+	it("fills a limited timeline page past missing authors and accounts", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		db.exec("pragma foreign_keys = off");
+		try {
+			for (const [id, authorProfileId, createdAt] of [
+				["late_valid", "profile_me", "2030-01-01T00:00:00Z"],
+				["late_orphan_author", "missing_author", "2030-01-02T00:00:00Z"],
+				["late_orphan_account", "profile_me", "2030-01-03T00:00:00Z"],
+			] as const) {
+				insertTestTweet(db, {
+					id,
+					authorProfileId,
+					createdAt,
+					text: "Synthetic late hydration",
+				});
+				insertTestEdge(db, id, createdAt);
+			}
+			db.exec(
+				"update tweet_account_edges set account_id = 'missing_account' where tweet_id = 'late_orphan_account'",
+			);
+			for (const account of [undefined, "acct_primary"]) {
+				expect(
+					listTimelineItems({ resource: "home", account, limit: 1 }, db).map(
+						(item) => item.id,
+					),
+				).toEqual(["late_valid"]);
+			}
+		} finally {
+			db.exec("pragma foreign_keys = on");
+		}
+	});
+
 	it("pins dense timeline searches to the created-time index and bounded hydration", () => {
 		setupTempHome();
 		const db = getNativeDb();
@@ -763,6 +866,291 @@ describe("query models", () => {
 		expect(preparedSql.some((sql) => sql.includes(" as match_count"))).toBe(
 			false,
 		);
+	});
+
+	it("batches URL hits and misses across a timeline page and refreshes on the next read", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const stamp = "2026-01-01T00:00:00Z";
+		for (let i = 0; i < 50; i++) {
+			const id = `url_batch_${i}`;
+			const url = `https://t.co/batch${i}`;
+			insertTestTweet(db, { id, text: `bulkurl ${url}.`, createdAt: stamp });
+			db.prepare("insert into tweets_fts(tweet_id, text) values (?, ?)").run(
+				id,
+				`bulkurl ${url}.`,
+			);
+			insertTestEdge(db, id, stamp);
+			if (i % 2 === 0)
+				db.prepare(
+					"insert into url_expansions(short_url, expanded_url, final_url, status, title, source, updated_at) values (?, ?, ?, 'hit', ?, 'test', ?)",
+				).run(
+					url,
+					`https://example.com/${i}`,
+					`https://example.com/${i}`,
+					`Title ${i}`,
+					stamp,
+				);
+		}
+		const prepare = vi.spyOn(NativeSqliteDatabase.prototype, "prepare");
+		try {
+			const items = listTimelineItems({
+				resource: "home",
+				search: "bulkurl",
+				limit: 50,
+			});
+			expect(items).toHaveLength(50);
+			expect(
+				items.find((item) => item.id === "url_batch_0")?.entities.urls?.[0],
+			).toMatchObject({
+				url: "https://t.co/batch0",
+				expandedUrl: "https://example.com/0",
+				title: "Title 0",
+			});
+			expect(
+				items.find((item) => item.id === "url_batch_1")?.entities.urls?.[0],
+			).toMatchObject({
+				url: "https://t.co/batch1",
+				expandedUrl: "https://t.co/batch1",
+			});
+			expect(
+				prepare.mock.calls.filter(([sql]) =>
+					sql.includes("from url_expansions"),
+				),
+			).toHaveLength(1);
+			db.prepare(
+				"update url_expansions set title = 'Updated' where short_url = 'https://t.co/batch0'",
+			).run();
+			expect(
+				listTimelineItems({
+					resource: "home",
+					search: "bulkurl",
+					limit: 50,
+				}).find((item) => item.id === "url_batch_0")?.entities.urls?.[0]?.title,
+			).toBe("Updated");
+		} finally {
+			prepare.mockRestore();
+		}
+	});
+
+	it("batches case-insensitive mention hits and misses and refreshes between reads", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const stamp = "2026-01-01T00:00:00Z";
+		for (let i = 0; i < 40; i++) {
+			const id = `mention_batch_${i}`;
+			const text = `bulkmention @Missing${i} @sam`;
+			insertTestTweet(db, { id, text, createdAt: stamp });
+			db.prepare("insert into tweets_fts(tweet_id, text) values (?, ?)").run(
+				id,
+				text,
+			);
+			insertTestEdge(db, id, stamp);
+		}
+		const prepare = vi.spyOn(NativeSqliteDatabase.prototype, "prepare");
+		try {
+			const read = () =>
+				listTimelineItems({
+					resource: "home",
+					search: "bulkmention",
+					limit: 40,
+				});
+			const items = read();
+			expect(items).toHaveLength(40);
+			expect(items[0]?.entities.mentions?.[0]?.profile?.handle).toMatch(
+				/^missing/,
+			);
+			expect(
+				prepare.mock.calls.filter(
+					([sql]) =>
+						sql.includes("from profiles") && sql.includes("lower(handle)"),
+				),
+			).toHaveLength(1);
+			db.prepare(
+				"update profiles set display_name = 'Fresh Sam' where lower(handle) = 'sam'",
+			).run();
+			expect(read()[0]?.entities.mentions?.[1]?.profile?.displayName).toBe(
+				"Fresh Sam",
+			);
+		} finally {
+			prepare.mockRestore();
+		}
+	});
+
+	it("hydrates repeated referenced retweets once per account", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const stamp = "2026-01-01T00:00:00Z";
+		insertTestTweet(db, {
+			id: "shared_retweet",
+			text: "Original @sam",
+			createdAt: stamp,
+		});
+		for (let i = 0; i < 40; i++) {
+			const id = `retweet_batch_${i}`;
+			insertTestTweet(db, { id, text: "bulkretweet", createdAt: stamp });
+			db.prepare("insert into tweets_fts(tweet_id, text) values (?, ?)").run(
+				id,
+				"bulkretweet",
+			);
+			insertTestEdge(db, id, stamp);
+			db.prepare(
+				"update tweet_account_edges set raw_json = ? where tweet_id = ?",
+			).run(JSON.stringify({ retweeted_tweet_id: "shared_retweet" }), id);
+		}
+		const prepare = vi.spyOn(NativeSqliteDatabase.prototype, "prepare");
+		try {
+			const items = listTimelineItems({
+				resource: "home",
+				search: "bulkretweet",
+				limit: 40,
+			});
+			expect(items).toHaveLength(40);
+			expect(
+				items.every((item) => item.retweetedTweet?.text === "Original @sam"),
+			).toBe(true);
+			expect(
+				prepare.mock.calls.filter(
+					([sql]) =>
+						sql.includes(
+							"from tweets t indexed by sqlite_autoindex_tweets_1",
+						) && sql.includes("json_each"),
+				),
+			).toHaveLength(1);
+			db.prepare(
+				"update tweets set deleted_at = ? where id = 'shared_retweet'",
+			).run(stamp);
+			expect(
+				listTimelineItems({
+					resource: "home",
+					search: "bulkretweet",
+					limit: 40,
+				}).every((item) => item.retweetedTweet === null),
+			).toBe(true);
+		} finally {
+			prepare.mockRestore();
+		}
+	});
+
+	it("batches descendant URL and mention enrichment without changing thread limits", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const stamp = "2030-01-01T00:00:00Z";
+		insertTestTweet(db, { id: "batch_root", text: "Root", createdAt: stamp });
+		for (let i = 0; i < 79; i++) {
+			insertTestTweet(db, {
+				id: `batch_child_${i}`,
+				text: `Reply @missing${i} https://t.co/child${i}`,
+				createdAt: stamp,
+				replyToId: "batch_root",
+			});
+		}
+		const prepare = vi.spyOn(NativeSqliteDatabase.prototype, "prepare");
+		try {
+			const thread = getTweetConversation("batch_root", 80, db)!;
+			expect(thread.items).toHaveLength(80);
+			expect(thread.truncated).toBe(false);
+			const children = thread.items.filter((item) => item.id !== "batch_root");
+			expect(
+				children.every(
+					(item) =>
+						item.entities.mentions?.length === 1 &&
+						item.entities.urls?.length === 1,
+				),
+			).toBe(true);
+			expect(
+				prepare.mock.calls.filter(([sql]) =>
+					sql.includes("from url_expansions"),
+				),
+			).toHaveLength(1);
+			expect(
+				prepare.mock.calls.filter(
+					([sql]) =>
+						sql.includes("from profiles") && sql.includes("lower(handle)"),
+				),
+			).toHaveLength(1);
+			expect(getTweetConversation("batch_root", 10, db)).toMatchObject({
+				truncated: true,
+				items: expect.any(Array),
+			});
+			expect(getTweetConversation("batch_root", 10, db)?.items).toHaveLength(
+				10,
+			);
+		} finally {
+			prepare.mockRestore();
+		}
+	});
+
+	it("batches cited tweets without changing order, visibility, or collection state", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const stamp = "2026-01-01T00:00:00Z";
+		for (const id of ["90001", "90002", "90003", "90004", "90005"]) {
+			insertTestTweet(db, { id, text: `Post ${id}`, createdAt: stamp });
+			if (id !== "90002" && id !== "90005") insertTestEdge(db, id, stamp);
+		}
+		insertTestCollection(db, "90001", "bookmarks", stamp);
+		insertTestCollection(db, "90002", "likes", stamp);
+		db.prepare("update tweets set deleted_at = ? where id = '90003'").run(
+			stamp,
+		);
+		db.prepare("update tweets set superseded_at = ? where id = '90004'").run(
+			stamp,
+		);
+		const ids = [
+			"90002",
+			" tweet_90001 ",
+			"90003",
+			"90004",
+			"90005",
+			"90001",
+			"missing",
+			"",
+		];
+		const scoped = getTweetsByIds(ids, "acct_primary");
+		expect(scoped.map((tweet) => tweet.id)).toEqual(["90002", "90001"]);
+		expect(scoped[0]).toMatchObject({ liked: true, bookmarked: false });
+		expect(scoped[1]).toMatchObject({ liked: false, bookmarked: true });
+		expect(getTweetsByIds(ids, "acct_studio")).toEqual([]);
+		expect(getTweetsByIds(ids, "all").map((tweet) => tweet.id)).toEqual([
+			"90002",
+			"90001",
+			"90005",
+		]);
+	});
+
+	it("bounds bulk tweet SQL queries across batches", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const ids = Array.from({ length: 501 }, (_, index) =>
+			String(91000 + index),
+		);
+		db.transaction(() => {
+			for (const id of ids)
+				insertTestTweet(db, {
+					id,
+					text: "Bulk post",
+					createdAt: "2026-01-01T00:00:00Z",
+				});
+		})();
+		const prepare = vi.spyOn(NativeSqliteDatabase.prototype, "prepare");
+		try {
+			expect(getTweetsByIds(ids).map((tweet) => tweet.id)).toEqual(ids);
+			const selects = prepare.mock.calls.filter(([sql]) =>
+				sql.includes("from tweets t"),
+			);
+			expect(selects).toHaveLength(2);
+			const plan = db
+				.prepare(`explain query plan ${selects[0]?.[0]}`)
+				.all(...ids.slice(0, 500)) as { detail: string }[];
+			expect(
+				plan.some((row) =>
+					row.detail.includes("USING INDEX sqlite_autoindex_tweets_1"),
+				),
+			).toBe(true);
+		} finally {
+			prepare.mockRestore();
+		}
 	});
 
 	it("keeps timeline membership account-scoped for the same canonical tweet", () => {
@@ -1382,6 +1770,69 @@ describe("query models", () => {
 			["tweet_reason_media", "keep:has-media"],
 			["tweet_reason_rt", "drop:rt"],
 		]);
+	});
+
+	it("preserves timestamp ties across global and account timeline reads", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const createdAt = "2035-01-01T00:00:00Z";
+		db.transaction(() => {
+			for (let index = 0; index < 5100; index++) {
+				const id = `window_tie_${String(index).padStart(5, "0")}`;
+				insertTestTweet(db, {
+					id,
+					createdAt,
+					text: "Synthetic tied timestamp",
+				});
+				insertTestEdge(db, id, createdAt);
+			}
+		})();
+		for (const account of [undefined, "acct_primary", "all"]) {
+			const query = { resource: "home" as const, account, limit: 2 };
+			const plan = buildTimelineItemsQuery(query);
+			expect(plan.usedRecentEdgeWindow).toBe(account === undefined);
+			const selected = listTimelineItems(query, db).map((item) => item.id);
+			const fallback = db
+				.prepare(plan.fallbackSql)
+				.all(...plan.fallbackParams) as Array<{ id: string }>;
+			expect(selected).toEqual(["window_tie_05099", "window_tie_05098"]);
+			expect(selected).toEqual(fallback.map((item) => item.id));
+		}
+		// Sparse account membership outside the candidate window must still be found.
+		db.prepare(
+			"delete from tweet_account_edges where tweet_id like 'window_tie_%' and tweet_id != 'window_tie_00000'",
+		).run();
+		expect(
+			listTimelineItems(
+				{ resource: "home", account: "acct_primary", limit: 2 },
+				db,
+			)[0]?.id,
+		).toBe("window_tie_00000");
+	});
+
+	it("uses chronological index order for the recent candidate window", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const query = buildTimelineItemsQuery({ resource: "home", limit: 18 });
+		const plan = db
+			.prepare(`explain query plan ${query.sql}`)
+			.all(...query.params) as Array<{
+			id: number;
+			parent: number;
+			detail: string;
+		}>;
+		const lists = new Set(
+			plan
+				.filter((row) => row.detail.startsWith("LIST SUBQUERY"))
+				.map((row) => row.id),
+		);
+		const candidates = plan.filter((row) => lists.has(row.parent));
+		expect(
+			candidates.some((row) => row.detail.includes("idx_tweets_created")),
+		).toBe(true);
+		expect(
+			candidates.some((row) => row.detail.includes("TEMP B-TREE FOR ORDER BY")),
+		).toBe(false);
 	});
 
 	it("hydrates rich tweet entities, media, reply context, and quote context", () => {
@@ -2103,6 +2554,80 @@ describe("query models", () => {
 		expect(conversation?.truncated).toBe(true);
 	});
 
+	it("keeps complete DM histories and independently mutable sender objects", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const baseline = getConversationThread("dm_001")!;
+		const insert = db.prepare(
+			"insert into dm_messages(id, conversation_id, sender_profile_id, text, created_at, direction, is_replied, media_count) values (?, 'dm_001', 'profile_me', 'Long thread', '2030-01-01', 'outbound', 0, 0)",
+		);
+		db.transaction(() => {
+			for (let i = 0; i < 1200; i++) insert.run(`long_dm_${i}`);
+		})();
+		const thread = getConversationThread("dm_001")!;
+		expect(thread.messages).toHaveLength(baseline.messages.length + 1200);
+		expect(thread.messages.slice(0, baseline.messages.length)).toEqual(
+			baseline.messages,
+		);
+		const first = thread.messages[baseline.messages.length]!;
+		const second = thread.messages[baseline.messages.length + 1]!;
+		expect(first.sender).toEqual(second.sender);
+		expect(first.sender).not.toBe(second.sender);
+		first.sender.displayName = "Changed locally";
+		expect(second.sender.displayName).not.toBe("Changed locally");
+		db.prepare(
+			"update profiles set display_name = 'Fresh sender' where id = 'profile_me'",
+		).run();
+		expect(
+			getConversationThread("dm_001")?.messages.at(-1)?.sender.displayName,
+		).toBe("Fresh sender");
+	});
+
+	it("reads stored Inbox scores only for current candidates", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const original = listInboxItems();
+		const candidate = original.items[0]!;
+		const insert = db.prepare(
+			"insert or replace into ai_scores values (?, ?, 'test', 99, 'Stored score', 'Reason', '2026-01-01')",
+		);
+		db.transaction(() => {
+			for (let i = 0; i < 1000; i++) insert.run("mention", `unrelated_${i}`);
+			insert.run(candidate.entityKind, candidate.entityId);
+		})();
+		const nativePrepare = NativeSqliteDatabase.prototype.prepare;
+		let scoreRows = 0;
+		const prepare = vi
+			.spyOn(NativeSqliteDatabase.prototype, "prepare")
+			.mockImplementation(function (this: NativeSqliteDatabase, sql: string) {
+				const statement = nativePrepare.call(this, sql);
+				if (sql.includes("from ai_scores")) {
+					const all = statement.all.bind(statement);
+					statement.all = (...params: unknown[]) => {
+						const rows = all(...params);
+						scoreRows += rows.length;
+						return rows;
+					};
+				}
+				return statement;
+			});
+		try {
+			const inbox = listInboxItems();
+			expect(inbox.items[0]).toMatchObject({
+				entityId: candidate.entityId,
+				source: "openai",
+				score: 99,
+				summary: "Stored score",
+			});
+			expect(scoreRows).toBeLessThanOrEqual(original.items.length);
+			expect(inbox.items.map((item) => item.entityId).sort()).toEqual(
+				original.items.map((item) => item.entityId).sort(),
+			);
+		} finally {
+			prepare.mockRestore();
+		}
+	});
+
 	it("builds a mixed inbox with ranked mentions and dms", () => {
 		setupTempHome();
 
@@ -2237,6 +2762,84 @@ describe("query models", () => {
 		expect(result.resource).toBe("dms");
 		expect(result.selectedConversation?.conversation.id).toBe("dm_003");
 		expect(result.selectedConversation?.messages).toHaveLength(2);
+	});
+
+	it("pages complete DM history across timestamp ties without changing full-thread reads", () => {
+		setupTempHome();
+		const db = getNativeDb();
+		const insert = db.prepare(
+			"insert into dm_messages(id,conversation_id,sender_profile_id,text,created_at,direction,is_replied,media_count) values (?,'dm_001','profile_me',?,'2030-01-01','outbound',0,0)",
+		);
+		db.transaction(() => {
+			for (let i = 0; i < 305; i++)
+				insert.run(`paged_${String(i).padStart(4, "0")}`, `Message ${i}`);
+		})();
+		const full = getConversationThread("dm_001", { account: "acct_primary" })!;
+		expect(full).not.toHaveProperty("nextCursor");
+		const messages: typeof full.messages = [];
+		let cursor: string | null | undefined;
+		let pages = 0;
+		do {
+			const page = getConversationThread("dm_001", {
+				account: "acct_primary",
+				messageLimit: 100,
+				...(cursor ? { before: decodeDmMessageCursor(cursor, "dm_001") } : {}),
+			})!;
+			expect(page.messages.length).toBeLessThanOrEqual(100);
+			messages.unshift(...page.messages);
+			cursor = page.nextCursor;
+			pages++;
+			if (pages > 5) throw new Error("Pagination failed to terminate");
+		} while (cursor);
+		expect(pages).toBe(4);
+		expect(messages).toEqual(full.messages);
+		expect(
+			getConversationThread("dm_001", {
+				account: "acct_studio",
+				messageLimit: 100,
+			}),
+		).toBeNull();
+		expect(() =>
+			getConversationThread("dm_001", { messageLimit: 201 }),
+		).toThrow("messageLimit must be between 1 and 200");
+		const page = getConversationThread("dm_001", { messageLimit: 100 })!;
+		expect(() => decodeDmMessageCursor(page.nextCursor!, "dm_other")).toThrow(
+			"Invalid message cursor",
+		);
+	});
+
+	it("separates DM lists and threads while retaining the combined contract and account scope", () => {
+		setupTempHome();
+		const combined = queryResource("dms", { account: "acct_primary" });
+		const list = queryResource("dms", {
+			account: "acct_primary",
+			view: "list",
+		});
+		expect(list).toEqual({ resource: "dms", items: combined.items });
+		expect(list).not.toHaveProperty("selectedConversation");
+		const id = combined.items[0]!.id;
+		const thread = queryResource("dms", {
+			account: "acct_primary",
+			view: "conversation",
+			conversationId: id,
+		});
+		expect(thread).toEqual({
+			resource: "dms",
+			items: [],
+			selectedConversation: combined.selectedConversation,
+		});
+		expect(
+			queryResource("dms", {
+				account: "acct_studio",
+				view: "conversation",
+				conversationId: id,
+			}),
+		).toEqual({ resource: "dms", items: [], selectedConversation: null });
+		expect(queryResource("dms", { view: "conversation" })).toEqual({
+			resource: "dms",
+			items: [],
+			selectedConversation: null,
+		});
 	});
 
 	it("hydrates selected dms with the active account filter", () => {

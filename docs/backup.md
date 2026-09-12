@@ -97,11 +97,13 @@ Git operations are rooted at the configured `repoPath`. If that directory sits i
 
 This is what makes birdclaw safe across multiple machines: each machine can sync independently, and the merge step preserves rows that only one side has.
 
-### Schema upgrades
+### Note Tweet compatibility
 
-Each Birdclaw release reads its current backup schema and earlier schemas. Schema v9 requires Birdclaw 0.12.2 or newer.
+Note Tweets keep their complete text and matching entities in the existing schema-8 tweet fields. New exports add an optional `note_tweet_json` field so current readers can preserve the full body when a later live payload contains only a preview. The backup schema stays at 8: existing readers can still validate and import these backups.
 
-Before the first schema-v9 export or sync, upgrade every Birdclaw installation that shares the backup repository. If an older installation encounters a schema-v9 backup, upgrade it and rerun the import or sync; the last schema-v8 generation remains available in the repository's Git history for recovery.
+Older writers omit that optional marker when re-exporting. They retain the full text and entities, but do not provide the new protection against preview-only live updates or the expandable Note Tweet presentation. Use current Birdclaw versions on machines that refresh Note Tweets.
+
+The local SQLite database migrates to version 11 on writable startup. Prepare read-only archive deployments with a writable initialization before serving the updated application; older read-only snapshots must first receive that migration.
 
 ## `backup import`
 

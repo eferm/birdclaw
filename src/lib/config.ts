@@ -20,6 +20,16 @@ export interface BirdclawPaths {
 export type MentionsDataSource = "birdclaw" | "auto" | "xurl" | "bird";
 export type ActionsTransport = "auto" | "bird" | "xurl";
 
+export function isReadOnlyDeployment() {
+	return process.env.BIRDCLAW_DEPLOYMENT_READ_ONLY === "1";
+}
+
+export function assertWritableDeployment() {
+	if (isReadOnlyDeployment()) {
+		throw new Error("This archive deployment is read-only");
+	}
+}
+
 export interface BirdclawConfig {
 	accounts?: {
 		default?: string;
@@ -96,6 +106,7 @@ function getConfigPath() {
 }
 
 export function writeBirdclawConfig(config: BirdclawConfig) {
+	assertWritableDeployment();
 	const configPath = getConfigPath();
 	mkdirSync(path.dirname(configPath), { recursive: true });
 	writeFileSync(configPath, `${JSON.stringify(config, null, "\t")}\n`, "utf8");
@@ -218,6 +229,7 @@ export function getBirdCommand() {
 
 export function ensureBirdclawDirs(): BirdclawPaths {
 	const paths = getBirdclawPaths();
+	if (isReadOnlyDeployment()) return paths;
 
 	mkdirSync(paths.rootDir, { recursive: true });
 	mkdirSync(paths.mediaOriginalsDir, { recursive: true });

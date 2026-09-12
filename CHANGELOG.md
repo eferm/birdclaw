@@ -1,32 +1,105 @@
 # CHANGELOG
 
-## 0.12.2 - Unreleased
+## 0.12.7 - Unreleased
 
-### Fixed
+- Preserve full X Note Tweets through live ingestion, search, archive/backup merges, and expandable timeline rendering. Keep schema-8 backup interoperability; older writers retain full text but omit the optional Note Tweet marker. Thanks @eferm (#134).
+- Compatibility: Note Tweet storage adds SQLite migration 11. Prepare existing read-only archive snapshots with writable initialization before serving the updated application.
 
-- Register `archive find` and `db stats` as strict nested CLI commands, reject unknown subcommands, and return a structured HTTP 400 for invalid `/api/query` resources.
-- Apply the shared account-selection policy to follow-graph and network-map reads so IDs, `@handle` selectors, and bare handles resolve consistently.
-- Preserve newer numeric profile identities and handle ownership when backup sync merges a prior valid generation after live profile updates.
-- Report scheduled account syncs as failed when their configured backup export fails, so launchd records a nonzero exit.
-- Make numeric X user IDs the durable live-profile identity, preserving history and dependent references across proven legacy rekeys, handle reuse, case-fold collisions, handoffs, and swaps.
-- Serialize backup repositories with renewable token-owned leases and reliable token-checked release, validate NUL-safe fetched and staged generations before checkout mutation, prove Git ownership before finalizing journal recovery, and protect fsynced pending-push receipts from later export generations.
-- Adopt validated non-Git exports into empty backup remotes without weakening inventory checks, and preserve sparse handle-less DM avatar enrichment without fabricating public handles.
-- Validate recovery journals and every referenced transaction/index path before filesystem mutation, and preserve rich display names when sparse Bird/DM payloads omit names.
-- Normalize shadow external IDs during target-absent profile canonicalization, and renew scheduled-job leases with fsynced atomic token-checked replacement.
-- Normalize stale shadow IDs already attached to canonical profiles, and restore only managed backup index entries during crash recovery so unrelated staging survives.
-- Reclaim stale lock guards with marker-owned revalidation, validate receipt roots before discovery/removal, and probe transaction-root writability before fallback selection.
-- Roll back invocation-created Git state after failed non-Git backup promotion unless a push receipt/remote commit requires retention, and bound profile reconciliation to indexed identity candidates.
-- Propagate explicit selected-account identity proof through Bird, Xurl, and local DM hydration, and compare pending-push remotes using credential-free canonical endpoint identity.
-- Preserve endpoint-routing identity while redacting remote credentials, fail closed for live/cross-host lease owners, and bind recovery journals to repository and Git-directory inode identities.
-- Route authored and profile-analysis live ingestion through the canonical tweet repository so sparse media/profile refreshes, rich video metadata, included context, revisions, and FTS stay consistent across Xurl sources.
-- Make live pagination, cache freshness, account verification, collection saturation, and follow/list completeness conservative across timeline, mentions, authored tweets, saved collections, DMs, and follow graph syncs.
-- Scope full archive restores to archive-owned state for the primary account so other accounts, unrelated local datasets, and their live cursors survive replacement imports.
+- Update the Hono server dependency to 4.13.7 and the development/CI Node pin to 26.8.2; installed-package checks retain the Node 26.5.1 minimum.
 
-### Testing and maintenance
+- Limit profile-history rows in SQLite before returning them and omit unused raw payloads from history reads, reducing sync and identity-search work for profiles with long histories.
 
-- Remove obsolete query compatibility facades and internal Promise transport wrappers in favor of their owning read-model, action, and Effect modules.
-- Remove the static live-transport forwarding facade and zero-consumer low-level Xurl Promise mirrors so consumers and tests use the owning Effect functions directly.
-- Add synthetic regressions for profile identity collisions and canonicalization, atomic mention cursor writes, backup lease takeover, fsynced publication recovery, hidden data, large shards, malicious paths, read-only freshness, receipt-owned push retries, corrupt remotes, and diverged histories.
+- Index historical follower membership, follow events, and list owners by profile so identity reconciliation avoids repeated full-table scans; existing version-9 snapshots remain readable during the additive version-10 migration.
+
+- Reduce CLI startup time by bundling the used Effect modules while keeping other direct dependencies external.
+
+- Add account-scoped `show tweet`, `show thread`, and `show dm` commands with JSON output, plus `db vacuum`. Validate numeric CLI options before account lookups or command work, preventing negative limits from requesting unlimited DM results and rejecting invalid score thresholds.
+- Honor `--json` for parser and uncaught runtime failures and server startup, expose global options in nested help, and validate the server port before startup. Exercise local JSON commands and failures through installed Node and Bun packages.
+- Add **Open on X** links to feed cards, parent and quoted tweets, and expanded conversations, including read-only archives. Reposts open the original tweet when its ID is known.
+
+- Add opt-in numeric CLI timing summaries for elapsed time, process CPU, and database work without exposing queries or archive contents.
+
+## 0.12.6 - 2026-09-12
+
+### Highlights
+
+- **Fresh mentions, even during a backfill.** Refresh the newest mentions without abandoning older pages, with native commands for checking the latest activity and resuming history.
+- **A faster everyday archive.** Feeds, Inbox, search, maps, and long DM conversations do less unnecessary work, while the browser and CLI start with fewer dependencies.
+- **More reliable images.** Avatars and link-preview thumbnails recover when local cached images are missing, including in read-only archives and network maps.
+
+### Fixes and improvements
+
+- Add `sync mentions --latest` and `--resume`. Newest-page reads preserve pending continuations, resumed scans retain their original boundaries, and JSON output reports the scan intent, position, and check time. Web and scheduled account refreshes now request current mentions. (#186)
+- Restore avatar fallbacks throughout profiles and maps, and include original-author profiles when syncing reposts and quoted tweets. (#146, #150, #152)
+- Restore external link-preview thumbnails through a bounded image cache, and cancel obsolete preview work so navigation does not leave new cards waiting behind abandoned requests. (#145, #153)
+- Keep hover previews correctly positioned and unclipped when their layout or content changes. (#167)
+- Preserve deterministic timeline ordering at page boundaries while selecting posts before loading their rich metadata. (#183)
+
+### Performance
+
+- Page long DM histories and cache the selected conversation independently of list filters. Earlier messages remain accessible, and complete CLI/API reads keep their existing behavior. Reuse sender profiles and avoid rerendering unchanged conversations while composing. (#182)
+- Speed up feeds, Inbox, and search by selecting and ranking narrow candidate rows before loading full content. Batch cited tweets, reposts, mention profiles, links, and conversation enrichment instead of repeating lookups per item.
+- Reduce startup requests and browser JavaScript, bootstrap authorized read-only status with the page, reuse validated read-only queries until the database changes, and serve compact versioned branding assets.
+- Make map interactions smoother by reusing profile ordering while panning and zooming. Reuse formatters, pause timestamp updates in hidden tabs, and skip unchanged timeline renders.
+- Speed up large archive imports and live sync by rebuilding tweet and DM search entries in batches instead of repeatedly scanning the full index. (#184, #185)
+- Reduce SQLite allocation and preparation work and reuse a bounded statement cache.
+- Start CLI help and local commands with fewer imports; standalone version checks return directly from package metadata.
+
+## 0.12.5 - 2026-09-12
+
+### Highlights
+
+- Serve a prepared Birdclaw archive in an explicit, opt-in read-only deployment mode.
+
+### Changes
+
+- Add `BIRDCLAW_DEPLOYMENT_READ_ONLY=1` for cached archive deployments, using strict database readers and suppressing automatic backup synchronization and cache population.
+- Reject mutating HTTP operations, live-generation routes, and transport subprocesses while retaining cached archive and authenticated MCP reads.
+- Hide unavailable navigation, reply composers, and sync controls in read-only mode, including automatic sync timers, while preserving normal interactive behavior and recovery pages.
+
+## 0.12.4 - 2026-09-11
+
+### Highlights
+
+- Choose the home-timeline transport used by digests through a deployment-wide environment default.
+
+### Changes
+
+- Add `BIRDCLAW_DIGEST_LIVE_MODE` for `today`, `digest`, and the digest API, preserve explicit overrides and the existing Xurl default, and report the selected home-timeline mode accurately. (#143 — thanks @sahil7886)
+- Refresh React, TanStack Router and Start, Effect, Zod, Lucide icons, Vite, and lint/type tooling while retaining the pinned Bun canary and Node 26 compatibility floor.
+
+## 0.12.3 - 2026-09-07
+
+### Highlights
+
+- Recover retained live-search results locally after an interrupted discussion without repeating paid API reads.
+
+### Changes
+
+- Expose retained keyword matches through `search tweets --resource search` and report saved pages and unique tweets when a later Xurl search request fails. (#138, #141 — thanks @sid-ravikumar)
+- Refresh TanStack Router and Start patch releases while retaining the pinned Bun canary and Node 26 compatibility floor.
+
+## 0.12.2 - 2026-09-05
+
+### Highlights
+
+- Keep local archives intact across interrupted live searches, account-scoped restores, profile identity changes, and recoverable Git backup failures.
+
+### Changes
+
+- Preserve completed Xurl search pages when a later request fails, keeping fetched tweets locally searchable without treating an interrupted discussion as complete. (#138 — thanks @sid-ravikumar)
+- Resume bounded Xurl Likes and Bookmarks backfills from an explicit pagination token without reusing the head-page cache. (#126 — thanks @eferm)
+- Scope replacement archive imports to the primary account's archive-owned data so other accounts, unrelated datasets, and live cursors survive.
+- Preserve numeric profile identities, history, affiliations, and dependent references through legacy rekeys, handle reuse, case-fold collisions, handoffs, swaps, and backup merges; retain rich display names and handle-less DM avatars from sparse payloads.
+- Recover Git backups safely with renewable token-owned leases, validated manifests and journal paths, fsynced publication receipts, repository identity checks, and preservation of unrelated staged files; support validated non-Git exports into empty remotes and roll back failed promotions when safe.
+- Keep backup remote credentials redacted without losing endpoint identity, reject live or cross-host lease takeover, validate receipt roots, and recover through writable transaction locations.
+- Persist authored and profile-analysis tweets through canonical ingestion so sparse refreshes preserve media, rich videos, included context, edit history, and full-text indexes.
+- Make pagination, cache freshness, account verification, saturation, and completeness conservative across timelines, mentions, authored tweets, saved collections, DMs, follow graphs, and Lists; apply consistent ID and handle account selection to follow and network views.
+- Report scheduled account syncs as failed when backup export fails, and renew job leases atomically so overlapping runs remain blocked.
+- Reject invalid LaunchAgent intervals before writing a plist, invalid search limits before archive reads, and non-finite DM follower filters or inbox scores before querying; preserve valid numeric spellings, zero search limits, fractional thresholds, and link-search coercion. (#137, #133, #132 — thanks @devYRPauli)
+- Register `archive find` and `db stats` as strict nested commands, reject unknown subcommands, and return structured HTTP 400 responses for invalid query resources.
+- Refresh mapping and icon libraries, adopt Vitest 5 and Playwright 1.63, update lint/type tooling and pinned GitHub Actions, and retain the checksum-pinned Bun canary and Node 26 compatibility floor.
+- Remove obsolete query and transport facades in favor of their owning read-model, action, and Effect modules, and extend synthetic coverage for identity collisions, atomic cursors, backup recovery, hidden data, corrupt remotes, large shards, and diverged histories.
 
 ## 0.12.1 - 2026-08-08
 

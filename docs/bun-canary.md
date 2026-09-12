@@ -33,7 +33,7 @@ Bun 1.4 is the first release line after Bun's Zig-to-Rust port. It preserves Bun
 
 ### Node contract
 
-The npm and Homebrew package remains a Node CLI with `#!/usr/bin/env node` and `engines.node: >=26.5.1 <27`. CI builds and runs the installed package under real Node 26.5.1 as well as the exact Bun binary.
+The npm and Homebrew package remains a Node CLI with `#!/usr/bin/env node` and `engines.node: >=26.5.1 <27`. CI runs Node coverage and builds on the maintained Node 26 version in `.node-version`, while installed-package smoke stays on the public Node 26.5.1 floor as well as the exact Bun binary.
 
 Bun reports Node compatibility `26.3.0`, below Birdclaw's public Node floor. Birdclaw does not weaken that floor or pretend Bun is a qualifying Node binary; Bun is identified through `process.versions.bun` and its own exact revision.
 
@@ -49,7 +49,7 @@ Vitest runs under both runtimes. Bun needs `zod` inlined through Vitest's depend
 
 Bun uses JavaScriptCore, so the primary Bun coverage gate uses Istanbul. The same suite reports 79.08% Istanbul branch coverage versus 80.20% under Node/V8 because the providers count generated/default branches differently. Birdclaw keeps the original 80% Node/V8 branch gate and an explicit 79% Bun/Istanbul gate rather than disguising the provider change; line, statement, and function thresholds remain 85%. Coverage runs get a 30-second per-test ceiling for instrumentation overhead, while ordinary tests retain the tighter 10-second ceiling.
 
-Playwright 1.62.1 is not generally documented as a Bun-supported runtime, but its full Birdclaw Chromium suite passes on this exact canary. CI pins that observed combination and tests the built production server, rather than claiming compatibility with arbitrary Bun versions.
+Playwright 1.63.0 is not generally documented as a Bun-supported runtime, but its full Birdclaw Chromium suite passes on this exact canary. CI pins that observed combination and tests the built production server, rather than claiming compatibility with arbitrary Bun versions.
 
 ### Environment and telemetry
 

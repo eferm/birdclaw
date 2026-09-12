@@ -7,6 +7,7 @@ import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { Effect } from "effect";
 import type { LinkPreviewResponse } from "./api-contracts";
 import { getNativeDb } from "./db";
+import { isReadOnlyDeployment } from "./config";
 import { runEffectPromise, tryPromise } from "./effect-runtime";
 import type { Database } from "./sqlite";
 import {
@@ -219,7 +220,7 @@ function headersFromIncoming(headers: http.IncomingHttpHeaders): HeadersInit {
 	return result;
 }
 
-function decodedResponseBody(response: Response) {
+export function decodedResponseBody(response: Response) {
 	const body = response.body;
 	if (!body) return null;
 	const encoding = response.headers
@@ -724,6 +725,17 @@ export const getOrFetchLinkPreviewEffect = Effect.fn("linkPreview.getOrFetch")(
 	function* (url: string, options: GetLinkPreviewOptions = {}) {
 		const db = getNativeDb({ seedDemoData: false });
 		const cached = readCachedPreview(db, url, options.shortUrl);
+		if (isReadOnlyDeployment()) {
+			return cached
+				? rowToPreview(cached)
+				: {
+						url,
+						title: null,
+						description: null,
+						imageUrl: null,
+						siteName: null,
+					};
+		}
 		if (cached && hasUsefulPreview(cached) && !options.refresh) {
 			return rowToPreview(cached);
 		}

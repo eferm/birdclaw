@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getRouteHandler } from "#/test/route-handlers";
 
 const queryResourceMock = vi.fn();
@@ -17,10 +17,104 @@ import { Route } from "./query";
 const GET = getRouteHandler(Route, "GET");
 
 describe("api query route", () => {
+	afterEach(() => vi.unstubAllEnvs());
+	it("authorizes before accessing cached query responses", async () => {
+		vi.stubEnv("NODE_ENV", "production");
+		vi.stubEnv("VITEST", "false");
+		vi.stubEnv("BIRDCLAW_DEPLOYMENT_READ_ONLY", "1");
+		vi.stubEnv("BIRDCLAW_ALLOW_REMOTE_WEB", "1");
+		vi.stubEnv("BIRDCLAW_WEB_TOKEN", "synthetic-query-cache-test");
+		const response = await GET({
+			request: new Request("https://archive.example/api/query?resource=home"),
+		});
+		expect(response.status).toBe(403);
+		expect(queryResourceMock).not.toHaveBeenCalled();
+		expect(maybeAutoUpdateBackupMock).not.toHaveBeenCalled();
+	});
+
 	beforeEach(() => {
 		queryResourceMock.mockReset();
 		maybeAutoUpdateBackupMock.mockReset();
 		maybeAutoUpdateBackupMock.mockResolvedValue({ skipped: true });
+	});
+
+	it.each(["list", "conversation"])(
+		"accepts the independent DM %s view",
+		async (view) => {
+			queryResourceMock.mockReturnValue({
+				resource: "dms",
+				items: [],
+				selectedConversation: null,
+			});
+			const response = await GET({
+				request: new Request(
+					`http://localhost/api/query?resource=dms&view=${view}&conversationId=dm_1&account=acct_primary`,
+				),
+			});
+			expect(response.status).toBe(200);
+			expect(queryResourceMock).toHaveBeenCalledWith(
+				"dms",
+				expect.objectContaining({
+					view,
+					conversationId: "dm_1",
+					account: "acct_primary",
+				}),
+			);
+		},
+	);
+
+	it.each([
+		"view=unknown",
+		"view=conversation",
+		"view=conversation&conversationId=%20",
+	])("rejects invalid DM view input %s", async (query) => {
+		const response = await GET({
+			request: new Request(`http://localhost/api/query?resource=dms&${query}`),
+		});
+		expect(response.status).toBe(400);
+		expect(queryResourceMock).not.toHaveBeenCalled();
+	});
+
+	it("bounds message pages and validates their conversation-specific cursor", async () => {
+		queryResourceMock.mockReturnValue({
+			resource: "dms",
+			items: [],
+			selectedConversation: null,
+		});
+		const cursor = Buffer.from(
+			JSON.stringify(["dm_1", "2030-01-01", "message_1"]),
+		).toString("base64url");
+		const response = await GET({
+			request: new Request(
+				`http://localhost/api/query?resource=dms&view=conversation&conversationId=dm_1&messageLimit=999&before=${cursor}`,
+			),
+		});
+		expect(response.status).toBe(200);
+		expect(queryResourceMock).toHaveBeenCalledWith(
+			"dms",
+			expect.objectContaining({
+				messageLimit: 200,
+				before: {
+					conversationId: "dm_1",
+					createdAt: "2030-01-01",
+					id: "message_1",
+				},
+			}),
+		);
+	});
+
+	it.each([
+		"messageLimit=0",
+		"messageLimit=-1",
+		"messageLimit=invalid",
+		"view=conversation&conversationId=dm_1&messageLimit=100&before=invalid",
+		"before=invalid",
+	])("rejects malformed DM paging %s", async (query) => {
+		const response = await GET({
+			request: new Request(`http://localhost/api/query?resource=dms&${query}`),
+		});
+		expect(response.status).toBe(400);
+		expect(queryResourceMock).not.toHaveBeenCalled();
 	});
 
 	it("parses dm filters", async () => {

@@ -4,6 +4,9 @@ import {
 	type RenderOptions,
 } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { DeploymentModeProvider } from "#/lib/deployment-mode";
+import { queryKeys } from "#/lib/query-client";
+import type { QueryEnvelope } from "#/lib/api-contracts";
 
 export function createTestQueryClient() {
 	return new QueryClient({
@@ -23,14 +26,38 @@ export function renderWithQueryClient(
 	ui: ReactNode,
 	options?: Omit<RenderOptions, "wrapper"> & {
 		queryClient?: QueryClient;
+		readOnly?: boolean;
 	},
 ) {
-	const { queryClient = createTestQueryClient(), ...renderOptions } =
-		options ?? {};
+	const {
+		queryClient = createTestQueryClient(),
+		readOnly,
+		...renderOptions
+	} = options ?? {};
+	if (readOnly !== undefined) {
+		queryClient.setQueryDefaults(queryKeys.status, { staleTime: Infinity });
+		queryClient.setQueryData(queryKeys.status, {
+			readOnly,
+			accounts: [],
+			archives: [],
+			transport: {
+				installed: false,
+				availableTransport: "local",
+				statusText: "Cached archive",
+			},
+			stats: { home: 0, mentions: 0, dms: 0, needsReply: 0, inbox: 0 },
+		} satisfies QueryEnvelope);
+	}
 	const result = testingLibraryRender(ui, {
 		...renderOptions,
 		wrapper: ({ children }) => (
-			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+			<QueryClientProvider client={queryClient}>
+				{readOnly === undefined ? (
+					children
+				) : (
+					<DeploymentModeProvider>{children}</DeploymentModeProvider>
+				)}
+			</QueryClientProvider>
 		),
 	});
 	return { ...result, queryClient };

@@ -113,6 +113,58 @@ const item = {
 };
 
 describe("TimelineCard", () => {
+	it.each([false, true])(
+		"opens each tweet on X without toggling its thread (readOnly=%s)",
+		(readOnly) => {
+			const onReply = vi.fn();
+			renderWithQueryClient(
+				<ConversationSurfaceScope>
+					<TimelineCard
+						item={{
+							...item,
+							id: "2030857479001960633",
+							replyToTweet: { ...item.replyToTweet, id: "20" },
+							quotedTweet: { ...item.quotedTweet, id: "2030857479001960634" },
+						}}
+						onReply={onReply}
+					/>
+				</ConversationSurfaceScope>,
+				{ readOnly },
+			);
+			const links = screen.getAllByRole("link", { name: /^Open on X/ });
+			expect(links.map((link) => link.getAttribute("href"))).toEqual([
+				"https://x.com/i/status/20",
+				"https://x.com/i/status/2030857479001960634",
+				"https://x.com/i/status/2030857479001960633",
+			]);
+			for (const link of links) {
+				expect(link).toHaveAttribute("target", "_blank");
+				expect(link).toHaveAttribute("rel", "noopener noreferrer");
+				expect(link).toHaveAccessibleName("Open on X (opens in a new tab)");
+				fireEvent.click(link);
+				expect(
+					screen.getByRole("button", { name: "Show conversation" }),
+				).toHaveAttribute("aria-expanded", "false");
+			}
+			expect(onReply).not.toHaveBeenCalled();
+		},
+	);
+
+	it("keeps cached tweet content without reply or analysis actions in read-only mode", () => {
+		renderWithQueryClient(
+			<ConversationSurfaceScope>
+				<TimelineCard item={item} onReply={vi.fn()} />
+			</ConversationSurfaceScope>,
+			{ readOnly: true },
+		);
+		expect(
+			screen.queryByRole("button", { name: "Reply" }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("link", { name: /Analyse/ }),
+		).not.toBeInTheDocument();
+		expect(screen.getAllByText("Sam Altman").length).toBeGreaterThan(0);
+	});
 	afterEach(() => {
 		cleanup();
 		vi.unstubAllGlobals();
@@ -130,9 +182,10 @@ describe("TimelineCard", () => {
 		expect(screen.getAllByText("Quoted tweet")[1]).toBeInTheDocument();
 		expect(screen.getByAltText("Demo image")).toBeInTheDocument();
 		expect(screen.getByText("Demo link")).toBeInTheDocument();
-		expect(
-			screen.queryByRole("img", { name: "Demo link" }),
-		).not.toBeInTheDocument();
+		expect(screen.getByRole("img", { name: "Demo link" })).toHaveAttribute(
+			"src",
+			"/api/link-preview?imageUrl=https%3A%2F%2Fexample.com%2Fpreview.jpg",
+		);
 		expect(container.querySelectorAll("header p")).toHaveLength(0);
 		fireEvent.click(screen.getByRole("button", { name: "Reply" }));
 		expect(onReply).toHaveBeenCalledWith("tweet_1");
@@ -195,6 +248,10 @@ describe("TimelineCard", () => {
 		expect(screen.queryByText("not bookmarked")).not.toBeInTheDocument();
 		expect(screen.queryByText("Reposted tweet")).not.toBeInTheDocument();
 		expect(screen.queryByText(/RT @ava/)).not.toBeInTheDocument();
+		expect(screen.getByRole("link", { name: /^Open on X/ })).toHaveAttribute(
+			"href",
+			"https://x.com/i/status/tweet_original",
+		);
 
 		fireEvent.click(screen.getByRole("button", { name: "Reply" }));
 		expect(onReply).toHaveBeenCalledWith("tweet_original");
@@ -249,6 +306,10 @@ describe("TimelineCard", () => {
 		expect(screen.getByText("Original app idea")).toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "Reply" }));
 		expect(onReply).toHaveBeenCalledWith("tweet_manual");
+		expect(screen.getByRole("link", { name: /^Open on X/ })).toHaveAttribute(
+			"href",
+			"https://x.com/i/status/tweet_manual",
+		);
 
 		const row = container.querySelector("[data-perf='timeline-card']");
 		if (!row) throw new Error("timeline card missing");
@@ -338,6 +399,16 @@ describe("TimelineCard", () => {
 		expect(
 			await screen.findByText("Original conversation"),
 		).toBeInTheDocument();
+		const thread = screen.getByRole("region", { name: "Conversation" });
+		const threadLinks = within(thread).getAllByRole("link", {
+			name: /^Open on X/,
+		});
+		expect(threadLinks.map((link) => link.getAttribute("href"))).toEqual([
+			"https://x.com/i/status/tweet_original",
+			"https://x.com/i/status/tweet_original_reply",
+		]);
+		fireEvent.click(threadLinks[1]!);
+		expect(thread).toBeInTheDocument();
 	});
 
 	it("keeps link preview cards on native retweets", () => {

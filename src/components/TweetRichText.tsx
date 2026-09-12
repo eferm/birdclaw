@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react";
+import { useDeploymentMode } from "#/lib/deployment-mode";
 import type { ReactNode } from "react";
 import {
 	collectTweetSegmentsForText,
@@ -86,6 +87,7 @@ export function TweetRichText({
 	as?: "p" | "span";
 	collapsible?: boolean;
 }) {
+	const { readOnly } = useDeploymentMode();
 	const [expanded, setExpanded] = useState(false);
 	const previewText = collapsible ? truncateNoteTweet(text) : text;
 	const collapsed = previewText !== text && !expanded;
@@ -169,7 +171,11 @@ export function TweetRichText({
 							<a
 								key={`segment-${String(index)}`}
 								className={tweetMentionClass}
-								href={`/profiles/${encodeURIComponent(segment.username)}`}
+								href={
+									readOnly
+										? undefined
+										: `/profiles/${encodeURIComponent(segment.username)}`
+								}
 							>
 								@{segment.username}
 							</a>

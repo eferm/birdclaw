@@ -684,5 +684,38 @@ describe("link index", () => {
 				}),
 			}),
 		]);
+		db.prepare(
+			"update tweet_account_edges set account_id = 'acct_primary' where tweet_id = '777'",
+		).run();
+		expect(searchLinks("linked fallback")[0]?.linkedTweet).toMatchObject({
+			accountId: "acct_primary",
+			accountHandle: "steipete",
+		});
+		db.prepare(
+			"insert into accounts(id, name, handle, transport, is_default, created_at) values ('acct_alt', 'Alt', 'alternate', 'bird', 0, '2026-04-01')",
+		).run();
+		db.prepare(
+			"insert into tweet_collections(account_id, tweet_id, kind, collected_at, source, raw_json, updated_at) values ('acct_alt', '777', 'likes', '2026-04-01', 'test', '{}', '2026-04-01')",
+		).run();
+		expect(searchLinks("linked fallback")[0]?.linkedTweet?.accountHandle).toBe(
+			"steipete",
+		);
+		db.prepare("delete from tweet_account_edges where tweet_id = '777'").run();
+		expect(searchLinks("linked fallback")[0]?.linkedTweet).toMatchObject({
+			accountId: "acct_alt",
+			accountHandle: "alternate",
+		});
+		db.prepare(
+			"update link_occurrences set account_id = 'acct_primary' where short_url = 'https://t.co/manual'",
+		).run();
+		expect(searchLinks("linked fallback")[0]?.linkedTweet?.accountHandle).toBe(
+			"steipete",
+		);
+		db.prepare(
+			"update accounts set handle = 'refreshed' where id = 'acct_primary'",
+		).run();
+		expect(searchLinks("linked fallback")[0]?.linkedTweet?.accountHandle).toBe(
+			"refreshed",
+		);
 	});
 });

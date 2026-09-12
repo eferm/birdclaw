@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { resetBirdclawPathsForTests } from "./config";
 import { getNativeDb, resetDatabaseForTests } from "./db";
+import { NativeSqliteDatabase } from "./sqlite";
 import { ingestTweetPayload } from "./tweet-repository";
 import {
 	editHistoryIdsFromPayload,
@@ -647,15 +648,19 @@ it("merges revision components beyond SQLite's traditional variable limit", () =
 			older_revision_id, newer_revision_id, source, observed_at
 		) values (?, ?, 'test', '2026-07-01T00:00:00.000Z')
 	`);
-	for (let index = 0; index < 5_000; index += 1) {
-		const revisionId = `scale-${String(index).padStart(4, "0")}`;
-		insertRevision.run(revisionId, revisionId);
-		if (index > 0) {
-			insertEdge.run(`scale-${String(index - 1).padStart(4, "0")}`, revisionId);
+	const component = db.transaction(() => {
+		for (let index = 0; index < 5_000; index += 1) {
+			const revisionId = `scale-${String(index).padStart(4, "0")}`;
+			insertRevision.run(revisionId, revisionId);
+			if (index > 0) {
+				insertEdge.run(
+					`scale-${String(index - 1).padStart(4, "0")}`,
+					revisionId,
+				);
+			}
 		}
-	}
-
-	const component = mergeTweetRevisionChain(db, ["scale-0000"]);
+		return mergeTweetRevisionChain(db, ["scale-0000"]);
+	})();
 
 	expect(component).toHaveLength(5_000);
 	expect(
@@ -765,4 +770,97 @@ it("reads both X archive edit-info variants", () => {
 			},
 		}),
 	).toEqual(["edit-1", "edit-2", "edit-3"]);
+});
+
+it("replaces a payload's FTS rows in one scan while preserving unrelated search entries", () => {
+	tempRoot = mkdtempSync(path.join(os.tmpdir(), "birdclaw-test-"));
+	process.env.BIRDCLAW_HOME = tempRoot;
+	resetBirdclawPathsForTests();
+	resetDatabaseForTests();
+	getNativeDb();
+	const statements: string[] = [];
+	const db = new NativeSqliteDatabase(path.join(tempRoot, "birdclaw.sqlite"), {
+		onStatement: (sql) => statements.push(sql),
+	});
+	try {
+		const payload = {
+			data: Array.from({ length: 40 }, (_, index) => ({
+				id: `batch_index_${index}`,
+				author_id: "42",
+				text: `searchbefore ${index}`,
+				created_at: "2026-09-12T10:00:00Z",
+			})),
+		};
+		ingestTweetPayload(db, {
+			accountId: "acct_primary",
+			payload,
+			source: "test",
+			edgeKind: "home",
+		});
+		db.prepare(
+			"insert into tweets_fts (tweet_id, text) values ('batch_index_0', 'obsolete duplicate')",
+		).run();
+		db.prepare(
+			"insert into tweets_fts (tweet_id, text) values ('unrelated_index_sentinel', 'untouched sentinel')",
+		).run();
+		statements.length = 0;
+		ingestTweetPayload(db, {
+			accountId: "acct_primary",
+			payload: {
+				data: payload.data.map((tweet) => ({
+					...tweet,
+					text: tweet.text.replace("searchbefore", "searchafter"),
+				})),
+				includes: {
+					tweets: [
+						{
+							...payload.data[0]!,
+							text: "included content must not override primary",
+						},
+					],
+				},
+			},
+			source: "test",
+			edgeKind: "home",
+		});
+		const deletions = statements.filter((sql) =>
+			/^\s*delete from tweets_fts/i.test(sql),
+		);
+		expect(deletions).toHaveLength(2); // One replacement scan and one retention cleanup.
+		expect(
+			db
+				.prepare(
+					"select count(*) count from tweets_fts where tweets_fts match 'searchbefore'",
+				)
+				.get(),
+		).toEqual({ count: 0 });
+		expect(
+			db
+				.prepare(
+					"select count(*) count from tweets_fts where tweets_fts match 'searchafter'",
+				)
+				.get(),
+		).toEqual({ count: 40 });
+		expect(
+			db
+				.prepare("select text from tweets_fts where tweet_id = 'batch_index_0'")
+				.all(),
+		).toEqual([{ text: "searchafter 0" }]);
+		expect(
+			db
+				.prepare(
+					"select text from tweets_fts where tweet_id = 'unrelated_index_sentinel'",
+				)
+				.get(),
+		).toEqual({ text: "untouched sentinel" });
+		statements.length = 0;
+		ingestTweetPayload(db, {
+			accountId: "acct_primary",
+			payload: { data: [] },
+			source: "test",
+		});
+		expect(statements.some((sql) => /tweets_fts/.test(sql))).toBe(false);
+	} finally {
+		db.close();
+	}
 });

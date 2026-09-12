@@ -86,6 +86,11 @@ export function registerSyncCommands({
 	syncCommand
 		.command("mentions")
 		.description("Refresh live mentions through xurl or bird")
+		.option("--latest", "Fetch the newest page without resuming an older scan")
+		.option(
+			"--resume",
+			"Resume saved mention pages before starting another scan",
+		)
 		.option("--account <username>", "Account username or id")
 		.option("--mode <mode>", "auto, bird, or xurl", "auto")
 		.option("--limit <n>", "Result limit per page", "20")
@@ -99,7 +104,14 @@ export function registerSyncCommands({
 		.option("--cache-ttl <seconds>", "Live-cache freshness window", "120")
 		.action(async (options) => {
 			try {
+				if (options.latest && options.resume)
+					throw new Error("Choose either --latest or --resume");
 				const result = await syncMentions({
+					...(options.latest
+						? { intent: "latest" as const }
+						: options.resume
+							? { intent: "resume" as const }
+							: {}),
 					account: options.account,
 					mode: options.mode,
 					limit: Number(options.limit),
@@ -218,6 +230,10 @@ export function registerSyncCommands({
 				"--max-pages <n>",
 				"Stop after N pages when using --all or --early-stop",
 			)
+			.option(
+				"--pagination-token <token>",
+				"Resume xurl from an opaque next_token",
+			)
 			.option("--early-stop", "Stop when a fetched page is already fully local")
 			.option("--cache-ttl <seconds>", "Live-cache freshness window", "120")
 			.option("--refresh", "Bypass live-cache freshness window")
@@ -229,6 +245,7 @@ export function registerSyncCommands({
 					limit: Number(options.limit),
 					all: Boolean(options.all) || options.maxPages !== undefined,
 					maxPages: options.maxPages ? Number(options.maxPages) : undefined,
+					paginationToken: options.paginationToken,
 					refresh: Boolean(options.refresh),
 					cacheTtlMs: Number(options.cacheTtl) * 1000,
 					earlyStop: Boolean(options.earlyStop),

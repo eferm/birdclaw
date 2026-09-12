@@ -1,10 +1,50 @@
 import { Effect } from "effect";
 import { runEffectPromise, tryPromise } from "./effect-runtime";
 import { LOCAL_WEB_PEER_HEADER } from "./local-peer";
+import { isReadOnlyDeployment } from "./config";
 
 export { LOCAL_WEB_PEER_HEADER } from "./local-peer";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const ARCHIVE_READ_APIS = new Set([
+	"/api/status",
+	"/api/query",
+	"/api/inbox",
+	"/api/blocks",
+	"/api/conversation",
+	"/api/network-map",
+	"/api/avatar",
+	"/api/link-preview",
+	"/api/link-insights",
+]);
+
+export function readOnlyRequestErrorResponse(
+	request: Pick<Request, "url" | "method">,
+	apiRoute = false,
+) {
+	if (!isReadOnlyDeployment()) return null;
+	if (request.method !== "GET" && request.method !== "HEAD") {
+		return jsonResponse(
+			{ ok: false, message: "This archive deployment is read-only" },
+			{ status: 405 },
+		);
+	}
+	const pathname = new URL(request.url).pathname;
+	if (
+		(apiRoute || pathname.startsWith("/api/")) &&
+		!ARCHIVE_READ_APIS.has(pathname)
+	) {
+		return jsonResponse(
+			{
+				ok: false,
+				message:
+					"This operation is unavailable in a read-only archive deployment",
+			},
+			{ status: 403 },
+		);
+	}
+	return null;
+}
 
 export function jsonResponse(data: unknown, init?: ResponseInit) {
 	const headers = new Headers(init?.headers);
@@ -138,6 +178,8 @@ function sameRequestOrigin(request: Request, origin: string, url: URL) {
 }
 
 export function sensitiveRequestErrorResponse(request: Request) {
+	const readOnlyDenied = readOnlyRequestErrorResponse(request, true);
+	if (readOnlyDenied) return readOnlyDenied;
 	const url = new URL(request.url);
 	const token = requestWebTokenStatus(request);
 	const isLocalRequest =

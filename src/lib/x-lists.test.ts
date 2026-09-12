@@ -322,7 +322,7 @@ describe("X List sync and local filtering", () => {
 		tempRoots.push(backupRoot);
 		const exported = await exportBackup({ repoPath: backupRoot });
 		expect(exported.manifest).toMatchObject({
-			schemaVersion: 9,
+			schemaVersion: 8,
 			counts: { x_lists: 1, x_list_members: 1 },
 		});
 

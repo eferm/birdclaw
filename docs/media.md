@@ -112,3 +112,28 @@ birdclaw media fetch --parallel 3 --pacing-ms 500 --video-pacing-ms 1500 --max-b
 - [Sync](sync.md) — live syncers that populate `media_json` with the variants payload `media fetch` consumes
 - [Archive Import](archive.md) — where archive byte reuse comes from
 - [CLI reference](cli.md#media-fetch) — canonical flag listing
+
+## Avatars
+
+All profile avatars, including the network map, first use the local `/api/avatar` cache. If that request fails,
+the browser makes one fallback attempt to the stored HTTPS `pbs.twimg.com/profile_images/`
+URL without a referrer. Both failures retain initials; arbitrary hosts, credential-bearing
+URLs, and non-profile paths are never used for the fallback. This also lets a read-only
+archive display a known avatar when its local image bytes were not copied.
+
+Xurl tweet reads include referenced tweets and their authors, preserving repost and
+quote author avatars in the normal sync response without separate profile lookups.
+
+## Link preview thumbnails
+
+External link-card images are served through `/api/link-preview?imageUrl=...`,
+with public-address and redirect validation, an 8 MiB decoded-size limit, and
+raster signature checks. The cache accepts JPEG, PNG, GIF, WebP, and AVIF;
+HTML and SVG responses are rejected. Failed requests retain the card's placeholder.
+
+Images are cached by URL (without fragments) under `media/thumbs/previews/`.
+The cache evicts its oldest images before exceeding 256 MiB or 2,048 files. A read-only deployment
+only serves existing files, so copy this directory alongside `media/thumbs/avatars/`
+when preparing an archive. Normal interactive browsing fills missing files.
+Hosting adapters that own separate durable media storage can implement the same
+image endpoint without making the archive database writable.

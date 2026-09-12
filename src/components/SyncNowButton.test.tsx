@@ -9,8 +9,34 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setStoredAccountId } from "./account-selection";
 import { SyncNowButton } from "./SyncNowButton";
+import { renderWithQueryClient } from "#/test/render";
 
 describe("SyncNowButton", () => {
+	it("does not mount saved auto-sync timers in a read-only deployment", async () => {
+		vi.useFakeTimers();
+		window.localStorage.setItem(
+			"birdclaw:auto-sync:timeline:default",
+			JSON.stringify({ enabled: true, intervalMs: 300000 }),
+		);
+		const fetch = vi.fn(async () => new Response("unexpected"));
+		vi.stubGlobal("fetch", fetch);
+		renderWithQueryClient(
+			<SyncNowButton
+				kind="timeline"
+				label="Sync timeline"
+				allowAutoSync
+				onSynced={vi.fn()}
+			/>,
+			{ readOnly: true },
+		);
+		expect(
+			screen.queryByRole("button", { name: "Sync timeline" }),
+		).not.toBeInTheDocument();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(600000);
+		});
+		expect(fetch).not.toHaveBeenCalled();
+	});
 	beforeEach(() => {
 		vi.restoreAllMocks();
 	});

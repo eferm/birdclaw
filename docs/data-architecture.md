@@ -1,5 +1,9 @@
 # Data And Architecture
 
+Live tweet ingestion replaces the touched search-index rows in a batch within its existing transaction. FTS5 does not index the stored tweet ID, so a per-tweet deletion repeatedly scans the archive. One batch deletion and insertion preserve primary-payload precedence, remove duplicate stale rows, and leave unrelated entries intact; retention reconciliation still removes deleted and superseded revisions.
+
+Archive imports rebuild touched tweet and DM search entries after the selected slices merge, using the final stored text and deletion state. This avoids repeated full FTS scans and handles duplicate IDs across authored, liked, bookmarked, and DM records without duplicating index entries.
+
 ## Effect Runtime Boundary
 
 Birdclaw's core I/O code should be written as Effect programs. Use `Effect.gen` for multi-step workflows, typed failures for expected errors, and `Effect.forEach` / `Effect.sleep` for concurrency, retry, timeout, and pacing logic.
@@ -9,6 +13,12 @@ Keep framework edges boring:
 - CLI command handlers may `await` Promise wrappers.
 - React components may call Promise wrappers from effects and event handlers.
 - route handlers may return normal `Response` values.
+
+The browser API adapter in `src/lib/api-client.ts` uses native Promises and
+`AbortSignal`, with schema validation and `ApiFetchError` at the HTTP boundary.
+React Query owns request cancellation, caching, and retries. Keeping this UI
+adapter independent of Effect avoids downloading the server workflow runtime
+for ordinary page reads; server and CLI core I/O retain their Effect programs.
 
 Inside `src/lib`, prefer exporting both forms when useful:
 
@@ -31,7 +41,6 @@ Use `runEffectPromise` from `src/lib/effect-runtime.ts` for Promise wrappers so 
 Current migrated surfaces:
 
 - typed Effect-to-Promise boundary handling in `src/lib/effect-runtime.ts`
-- web API client parsing and sync-job polling in `src/lib/api-client.ts`
 - `bird` command availability and execution in `src/lib/bird-command.ts`
 - `bird` JSON transport, large stdout capture, and temp-file cleanup in `src/lib/bird.ts`
 - `xurl` command execution, JSON parsing, retry delay, mutation helpers, and public adapter wrappers in `src/lib/xurl.ts`
@@ -49,7 +58,7 @@ Current migrated surfaces:
 - scheduled bookmark sync audit logging, overlap locking, backup pass, and launchd install in `src/lib/bookmark-sync-job.ts`
 - web sync orchestration, plan runners, backup pass, and job polling in `src/lib/web-sync.ts`
 
-Production `src/lib` code should stay free of ad hoc `async`/`await` orchestration. Next migrations should target remaining CLI, React, and route edges only where an Effect boundary would simplify error handling, cancellation, retries, or concurrency; otherwise keep those framework adapters as small Promise wrappers over core Effect programs.
+Core production `src/lib` code should stay free of ad hoc `async`/`await` orchestration. The browser API adapter is a framework boundary, including its paced HTTP sync-job polling. Next migrations should target remaining CLI, React, and route edges only where an Effect boundary would simplify error handling, cancellation, retries, or concurrency; otherwise keep those framework adapters small.
 
 ## Transport Strategy
 
@@ -487,57 +496,27 @@ Options by transport:
 
 ## Package Layout
 
+Birdclaw is one package with shared core modules, not a multi-package workspace:
+
 ```text
 birdclaw/
-  apps/
-    web/
-  packages/
-    archive/
-    cli/
-    core/
-    db/
-    server/
-    transport-bird/
-    transport-xurl/
-    ui/
-  docs/
-    spec.md
-    cli.md
-    data-architecture.md
+  bin/birdclaw.mjs       # installed CLI launcher
+  src/
+    cli.ts              # CLI entry and command context
+    cli/                # command registration by domain
+    components/         # React views and controllers
+    routes/             # TanStack pages and HTTP API handlers
+    lib/                # storage, query models, transports, sync, and analysis
+      archive/          # archive readers, slices, reconciliation, and apply
+    test/               # shared fixtures and test helpers
+  scripts/              # builds, toolchain verification, package and perf proof
+  playwright/           # production-server browser tests
+  docs/                 # user guides and architecture
 ```
 
-### Package responsibilities
+SQLite connection ownership lives in `src/lib/db.ts`; ordered schema definitions live in `src/lib/database-schema.ts`, and `src/lib/database-migrations.ts` applies them transactionally. `src/lib/backup-filesystem.ts` owns backup path safety and durable filesystem operations; `src/lib/backup.ts` coordinates export, import, recovery, and Git synchronization.
 
-- `core`
-  - domain types
-  - sync contracts
-  - ranking contracts
-- `archive`
-  - archive parsers and normalizers
-- `db`
-  - native SQLite connections
-  - transactional migrations
-  - repositories
-  - FTS helpers
-  - DM influence and replied/unreplied query helpers
-- `transport-xurl`
-  - `xurl` detection
-  - subprocess exec wrappers
-  - output parsing
-- `transport-bird`
-  - `bird` detection
-  - subprocess exec wrappers
-  - GraphQL-focused reads/actions
-- `server`
-  - local app API
-  - background sync orchestration
-- `cli`
-  - command surface
-- `ui`
-  - React components, inbox, thread, DM views
-  - compact sender bio / influence surfaces for DM context
-- `apps/web`
-  - TanStack Start app shell
+Transport adapters shell out to `bird` and `xurl`; they do not own those tools' credentials or configuration. CLI and HTTP handlers share the canonical repositories and query models in `src/lib/`. The browser API boundary remains independent of the server's Effect workflows.
 
 ## Testing Plan
 
@@ -574,3 +553,43 @@ Primary:
 Secondary later:
 
 - standalone desktop wrapper if the web UX becomes primary
+
+## Read-only status bootstrap
+
+Single-account read-only deployments may include the status envelope in the
+initial HTML after the same authorization checks as `/api/status`. The browser
+seeds its status query from that envelope, so it can request account-scoped data
+without another status round trip. Multiple-account and writable deployments
+retain the existing client flow; server rendering cannot infer browser-local
+account selection. Bootstrap failures fall back to the normal client request.
+No archive discovery, live reads, or backup updates run in the bootstrap.
+Server query clients remain request-local and do not retain timed GC entries.
+
+### Read-only query response reuse
+
+After authorization and filter parsing, `/api/query` may reuse validated serialized JSON in read-only deployments. Entries are scoped to the reader connection and normalized resource/filter arguments, including account selection. Each lookup checks SQLite `data_version`; changed databases drop their prior entries. A second check avoids retaining a response across an external commit. The cache retains at most 100 entries and 4 MiB of encoded keys/values per reader, skips responses over 512 KiB and keys over 4 KiB, and evicts least-recently-used entries.
+
+Writable deployments bypass this cache. Exceptions are not retained, and response bodies remain independent. This is process-local reuse of deterministic reads, not an HTTP cache: authentication and HTTP cache policy remain unchanged, and time-dependent link insights are outside its scope.
+
+Ordinary timeline reads materialize their limited membership before hydrating reply/quote profiles and collection metadata. Ordinary timeline selection retains account/author joins before the limit so malformed orphan rows cannot shorten a page. Saved-post reads keep their collection query plan. Search retains its existing bounded selection and join order, and recent-window fallback, account preference, filters, and keyset ordering remain unchanged.
+
+Recent-window candidate order includes tweet IDs so timestamp ties match the final page order. Account-scoped and literal-account callers retain their existing membership rules.
+
+## DM read views
+
+`GET /api/query?resource=dms` retains the combined list and selected-thread
+response used by existing clients. The web workspace bootstraps with the combined response, then requests `view=list` for
+conversation metadata and `view=conversation&conversationId=...&account=...`
+for a selected thread. The latter returns an empty `items` array and the
+account-scoped `selectedConversation`, or null when it is unavailable. List
+filters apply to the list; the thread view selects by conversation ID and account.
+
+The initial combined response seeds the thread cache without a second request.
+The browser caches thread responses by account and conversation separately from
+list filters. Sync and successful writes invalidate both caches. The browser requests the newest 100 messages (`messageLimit=100`) and loads older
+pages on demand through the returned `selectedConversation.nextCursor`. A cursor
+is passed as `before` with `view=conversation`, its exact `conversationId`, and
+`messageLimit`; malformed or cross-conversation cursors are rejected. Message
+pages are capped at 200 and use creation time plus message ID to handle ties.
+Calls without `messageLimit`, including existing combined/API and CLI full-thread
+reads, retain complete history. All messages remain accessible through pagination.
