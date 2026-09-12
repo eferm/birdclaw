@@ -10,7 +10,7 @@
 
 - Limit profile-history rows in SQLite before returning them and omit unused raw payloads from history reads, reducing sync and identity-search work for profiles with long histories.
 
-- Index historical follower membership, follow events, and list owners by profile so identity reconciliation avoids repeated full-table scans; existing version-9 snapshots remain readable during the additive version-10 migration.
+- Index historical follower membership, follow events, and list owners by profile so identity reconciliation avoids repeated full-table scans.
 
 - Reduce CLI startup time by bundling the used Effect modules while keeping other direct dependencies external.
 

@@ -5,11 +5,12 @@ description: "birdclaw config files, env vars, transport precedence, and multi-a
 
 # Configuration
 
-Database schema version 10 adds profile-reference lookup indexes without changing
-stored records. Writable access migrates version 9 automatically; read-only access
-continues serving version-9 snapshots without modifying them. Older incompatible
-schemas and unknown future versions are rejected. After a writable upgrade, use a
-version-10-capable build for rollback because earlier builds require schema 9.
+Database schema version 11 adds the optional Note Tweet marker column. Writable
+access migrates older databases automatically. Before serving an existing archive
+in read-only mode, prepare it with this build using `birdclaw init`; read-only
+access requires the current schema and never migrates the snapshot. Unknown
+future schema versions are rejected by read-only access. Portable backups remain
+at schema 8, as described in [Backup](backup.md#note-tweet-compatibility).
 
 birdclaw reads configuration from these layers:
 
